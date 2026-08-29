@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "description": "SSP V1 五种 Wire 与 JSON exact bytes 共享向量",
+  "cases": [
+    {
+      "name": "publish-basic",
+      "kind": 1,
+      "kind_name": "Publish",
+      "channel": "news",
+      "content_json_hex": "7b227469746c65223a2268656c6c6f227d",
+      "wire_hex": "830101581882646e657773517b227469746c65223a2268656c6c6f227d"
+    },
+    {
+      "name": "publish-bilingual-and-exact-whitespace",
+      "kind": 1,
+      "kind_name": "Publish",
+      "channel": "中文📡",
+      "content_json_hex": "20207b22e6b688e681af223a22e4bda0e5a5bdf09f9880222c2265736361706564223a225c75346531365c6e227d2020",
+      "wire_hex": "830101583e826ae4b8ade69687f09f93a1583020207b22e6b688e681af223a22e4bda0e5a5bdf09f9880222c2265736361706564223a225c75346531365c6e227d2020"
+    },
+    {
+      "name": "publish-empty-object",
+      "kind": 1,
+      "kind_name": "Publish",
+      "channel": "empty",
+      "content_json_hex": "7b7d",
+      "wire_hex": "8301014a8265656d707479427b7d"
+    },
+    {
+      "name": "publish-json-array",
+      "kind": 1,
+      "kind_name": "Publish",
+      "channel": "arrays",
+      "content_json_hex": "5b312c747275652c6e756c6c2c2278225d",
+      "wire_hex": "830101581a8266617272617973515b312c747275652c6e756c6c2c2278225d"
+    },
+    {
+      "name": "publish-nested-object",
+      "kind": 1,
+      "kind_name": "Publish",
+      "channel": "nested",
+      "content_json_hex": "7b2261223a7b2262223a5b315d7d7d",
+      "wire_hex": "830101581882666e65737465644f7b2261223a7b2262223a5b315d7d7d"
+    },
+    {
+      "name": "publish-json-string",
+      "kind": 1,
+      "kind_name": "Publish",
+      "channel": "string",
+      "content_json_hex": "2268656c6c6f22",
+      "wire_hex": "830101508266737472696e67472268656c6c6f22"
+    },
+    {
+      "name": "publish-json-number",
+      "kind": 1,
+      "kind_name": "Publish",
+      "channel": "number",
+      "content_json_hex": "3432",
+      "wire_hex": "8301014b82666e756d626572423432"
+    },
+    {
+      "name": "publish-json-boolean",
+      "kind": 1,
+      "kind_name": "Publish",
+      "channel": "boolean",
+      "content_json_hex": "74727565",
+      "wire_hex": "8301014e8267626f6f6c65616e4474727565"
+    },
+    {
+      "name": "publish-json-null",
+      "kind": 1,
+      "kind_name": "Publish",
+      "channel": "null",
+      "content_json_hex": "6e756c6c",
+      "wire_hex": "8301014b82646e756c6c446e756c6c"
+    },
+    {
+      "name": "subscribe-ordinary",
+      "kind": 2,
+      "kind_name": "Subscribe",
+      "channel": "news",
+      "wire_hex": "8301024681646e657773"
+    },
+    {
+      "name": "subscribe-all",
+      "kind": 2,
+      "kind_name": "Subscribe",
+      "channel": "*",
+      "wire_hex": "8301024381612a"
+    },
+    {
+      "name": "unsubscribe-ordinary",
+      "kind": 3,
+      "kind_name": "Unsubscribe",
+      "channel": "news",
+      "wire_hex": "8301034681646e657773"
+    },
+    {
+      "name": "unsubscribe-all",
+      "kind": 3,
+      "kind_name": "Unsubscribe",
+      "channel": "*",
+      "wire_hex": "8301034381612a"
+    },
+    {
+      "name": "subscriptions-request",
+      "kind": 4,
+      "kind_name": "SubscriptionsRequest",
+      "wire_hex": "8301044180"
+    },
+    {
+      "name": "subscriptions-response-empty",
+      "kind": 5,
+      "kind_name": "SubscriptionsResponse",
+      "channels": [],
+      "wire_hex": "830105428180"
+    },
+    {
+      "name": "subscriptions-response-sorted",
+      "kind": 5,
+      "kind_name": "SubscriptionsResponse",
+      "channels": ["alerts", "news"],
+      "wire_hex": "8301054e818266616c65727473646e657773"
+    },
+    {
+      "name": "subscriptions-response-all",
+      "kind": 5,
+      "kind_name": "SubscriptionsResponse",
+      "channels": ["*"],
+      "wire_hex": "830105448181612a"
+    }
+  ]
+}

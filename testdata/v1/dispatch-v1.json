@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "match_cases": [
+    {"name": "ordinary-match", "subscriptions": ["news"], "publish_channel": "news", "expected": true},
+    {"name": "ordinary-no-match", "subscriptions": ["news"], "publish_channel": "alerts", "expected": false},
+    {"name": "wildcard-match", "subscriptions": ["*"], "publish_channel": "anything", "expected": true},
+    {"name": "empty-no-match", "subscriptions": [], "publish_channel": "news", "expected": false},
+    {"name": "case-sensitive", "subscriptions": ["News"], "publish_channel": "news", "expected": false},
+    {"name": "unicode-exact-match", "subscriptions": ["中文📡"], "publish_channel": "中文📡", "expected": true}
+  ],
+  "duplicate_identity_case": {
+    "publish_channel": "news",
+    "online_identities": [
+      {"remote_public_key_hex": "021111111111111111111111111111111111111111111111111111111111111111", "subscriptions": ["news"]},
+      {"remote_public_key_hex": "021111111111111111111111111111111111111111111111111111111111111111", "subscriptions": ["*"]},
+      {"remote_public_key_hex": "032222222222222222222222222222222222222222222222222222222222222222", "subscriptions": ["alerts"]}
+    ],
+    "expected_unique_matching_identity_hex": [
+      "021111111111111111111111111111111111111111111111111111111111111111"
+    ]
+  },
+  "publish_event": {
+    "publisher_public_key_hex": "023333333333333333333333333333333333333333333333333333333333333333",
+    "channel": "news",
+    "content_json_hex": "20207b226e223a317d200a",
+    "wire_hex": "8301015282646e6577734b20207b226e223a317d200a"
+  }
+}

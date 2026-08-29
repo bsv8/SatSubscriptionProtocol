@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "normalization": [
+    {"name": "empty", "input": [], "expected": []},
+    {"name": "utf8-byte-order", "input": ["news", "alerts", "中文"], "expected": ["alerts", "news", "中文"]},
+    {"name": "wildcard-only", "input": ["*"], "expected": ["*"]}
+  ],
+  "transitions": [
+    {"name": "subscribe-ordinary", "initial": [], "operation": "subscribe", "channel": "news", "expected": ["news"]},
+    {"name": "subscribe-second-ordinary", "initial": ["news"], "operation": "subscribe", "channel": "alerts", "expected": ["alerts", "news"]},
+    {"name": "subscribe-duplicate-is-idempotent", "initial": ["news"], "operation": "subscribe", "channel": "news", "expected": ["news"]},
+    {"name": "subscribe-wildcard-replaces-all", "initial": ["alerts", "news"], "operation": "subscribe", "channel": "*", "expected": ["*"]},
+    {"name": "subscribe-ordinary-after-wildcard", "initial": ["*"], "operation": "subscribe", "channel": "news", "expected": ["*"]},
+    {"name": "unsubscribe-ordinary", "initial": ["alerts", "news"], "operation": "unsubscribe", "channel": "news", "expected": ["alerts"]},
+    {"name": "unsubscribe-missing-is-idempotent", "initial": ["news"], "operation": "unsubscribe", "channel": "alerts", "expected": ["news"]},
+    {"name": "unsubscribe-ordinary-from-wildcard", "initial": ["*"], "operation": "unsubscribe", "channel": "news", "expected": ["*"]},
+    {"name": "unsubscribe-wildcard-clears-all", "initial": ["*"], "operation": "unsubscribe", "channel": "*", "expected": []},
+    {"name": "unsubscribe-wildcard-clears-ordinary", "initial": ["alerts", "news"], "operation": "unsubscribe", "channel": "*", "expected": []}
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "cases": [
+    {"name": "unknown-version", "wire_hex": "8302014180", "expected_code": "UNSUPPORTED_VERSION"},
+    {"name": "unknown-kind", "wire_hex": "8301064180", "expected_code": "UNSUPPORTED_KIND"},
+    {"name": "outer-array-too-short", "wire_hex": "820101", "expected_code": "INVALID_WIRE"},
+    {"name": "outer-trailing-bytes", "wire_hex": "830104418000", "expected_code": "INVALID_WIRE"},
+    {"name": "non-canonical-version", "wire_hex": "831801044180", "expected_code": "NON_CANONICAL_CBOR"},
+    {"name": "publish-wildcard", "wire_hex": "8301014682612a417b7d", "expected_code": "INVALID_CHANNEL"},
+    {"name": "publish-empty-channel", "wire_hex": "830101458260417b7d", "expected_code": "INVALID_CHANNEL"},
+    {"name": "publish-invalid-channel-utf8", "wire_hex": "830101468261ff417b7d", "expected_code": "INVALID_CHANNEL"},
+    {"name": "publish-invalid-json", "wire_hex": "8301014882646e657773417b", "expected_code": "INVALID_JSON"},
+    {"name": "publish-invalid-json-utf8", "wire_hex": "8301014982646e65777342ffff", "expected_code": "INVALID_JSON"},
+    {"name": "publish-trailing-json", "wire_hex": "8301014a82646e657773437b7d78", "expected_code": "INVALID_JSON"},
+    {"name": "response-duplicate-channel", "wire_hex": "8301054c8182646e657773646e657773", "expected_code": "INVALID_SUBSCRIPTIONS"},
+    {"name": "response-unsorted-channel", "wire_hex": "8301054e8182646e65777366616c65727473", "expected_code": "INVALID_SUBSCRIPTIONS"},
+    {"name": "response-wildcard-mixed", "wire_hex": "830105498182612a646e657773", "expected_code": "INVALID_SUBSCRIPTIONS"},
+    {"name": "non-canonical-publish-array", "wire_hex": "83010158199802646e657773517b227469746c65223a2268656c6c6f227d", "expected_code": "NON_CANONICAL_CBOR"},
+    {"name": "non-canonical-response-text", "wire_hex": "83010548818178046e657773", "expected_code": "NON_CANONICAL_CBOR"},
+    {"name": "request-map-instead-of-array", "wire_hex": "83010441a0", "expected_code": "INVALID_WIRE"},
+    {"name": "document-is-text", "wire_hex": "8301016161", "expected_code": "INVALID_WIRE"},
+    {"name": "oversized-document-claim", "wire_hex": "8301015a00100000", "expected_code": "MESSAGE_TOO_LARGE"}
+  ]
+}
