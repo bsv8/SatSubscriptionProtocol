@@ -1,0 +1,53 @@
+{
+  "name": "@bsv8/ssp",
+  "version": "0.1.0",
+  "description": "SSP V1 no-network subscription broadcast SDK（无网络订阅广播 SDK）",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol/index.d.ts",
+      "import": "./dist/protocol/index.js"
+    },
+    "./wire": {
+      "types": "./dist/wire/index.d.ts",
+      "import": "./dist/wire/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
+    },
+    "./subscription": {
+      "types": "./dist/subscription/index.d.ts",
+      "import": "./dist/subscription/index.js"
+    },
+    "./service": {
+      "types": "./dist/service/index.d.ts",
+      "import": "./dist/service/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "validate:cddl": "cddl validate ../spec/v1/ssp.cddl",
+    "test": "npm run validate:cddl && npm run build && node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "cddl": "^0.21.1",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

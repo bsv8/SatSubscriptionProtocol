@@ -1,0 +1,40 @@
+; SSP V1 deterministic CBOR schema.
+; All arrays are definite-length arrays.  No maps, tags, floats, or
+; indefinite-length items are valid SSP values.
+
+ssp-wire = [wire-version, wire-kind, document-cbor]
+wire-version = 1
+wire-kind = 1 / 2 / 3 / 4 / 5
+document-cbor = bytes .size (1..1048512)
+
+channel = text .size (1..256)
+content-json = bytes .size (0..1048000)
+
+; Kind 1: Publish（发布）
+publish-cbor = [channel, content-json]
+
+; Kind 2: Subscribe（订阅）
+subscribe-cbor = [channel]
+
+; Kind 3: Unsubscribe（取消订阅）
+unsubscribe-cbor = [channel]
+
+; Kind 4: SubscriptionsRequest（查询订阅列表）
+subscriptions-request-cbor = []
+
+; Kind 5: SubscriptionsResponse（返回订阅列表）
+subscriptions-response-cbor = [channels-cbor]
+channels-cbor = [*1024 channel]
+
+; channel is a non-empty UTF-8 text string with at most 256 UTF-8 bytes.
+; The exact text "*" is allowed only in subscribe-cbor, unsubscribe-cbor,
+; and as the sole item of channels-cbor.
+; content-json is a byte string with at most 1048000 bytes containing one
+; complete RFC 8259 JSON value, with its original UTF-8 bytes preserved.
+
+; Frozen SDK limits（冻结的 SDK 限制）:
+; MaxWireBytes = 1048576（完整 Wire 最大 1 MiB）
+; MaxDocumentBytes = 1048512（内层 document 最大字节数）
+; MaxChannelUTF8Bytes = 256（channel UTF-8 最大字节数）
+; MaxContentJSONBytes = 1048000（JSON 原始字节最大长度）
+; MaxSubscriptions = 1024（订阅集合最大元素数）
