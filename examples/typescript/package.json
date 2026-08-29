@@ -1,0 +1,11 @@
+{
+  "name": "ssp-typescript-consumer-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node main.mjs"
+  },
+  "dependencies": {
+    "@bsv8/ssp": "file:../../typescript"
+  }
+}
