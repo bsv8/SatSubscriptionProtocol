@@ -7,6 +7,10 @@ import test from "node:test";
 import {
   ErrorCode,
   Kind,
+  MAX_CHANNEL_UTF8_BYTES,
+  MAX_CONTENT_JSON_BYTES,
+  MAX_SUBSCRIPTIONS,
+  MAX_WIRE_BYTES,
   MemoryBackend,
   RecordingDispatcher,
   SSPError,
@@ -52,6 +56,14 @@ function expectCode(callback, code) {
   assert.throws(callback, (error) => error instanceof SSPError && error.code === code);
 }
 
+function validJsonBytes(byteLength) {
+  const result = new Uint8Array(byteLength);
+  result[0] = 0x22;
+  result.fill(0x61, 1, byteLength - 1);
+  result[byteLength - 1] = 0x22;
+  return result;
+}
+
 test("shared Wire fixtures encode and decode byte-for-byte", async () => {
   const fixtureData = await fixture("wire-v1.json");
   const seenKinds = new Set();
@@ -80,6 +92,40 @@ test("shared invalid fixtures return the same stable error codes", async () => {
   for (const testCase of fixtureData.cases) {
     expectCode(() => parse(fromHex(testCase.wire_hex)), ErrorCode[testCase.expected_code]);
   }
+});
+
+test("frozen protocol size limits accept exact boundary and reject one byte over", () => {
+  const channelAtLimit = "a".repeat(MAX_CHANNEL_UTF8_BYTES);
+  assert.doesNotThrow(() => newSubscribe(channelAtLimit));
+  expectCode(() => newSubscribe(`${channelAtLimit}a`), ErrorCode.INVALID_CHANNEL);
+
+  const contentJsonAtLimit = validJsonBytes(MAX_CONTENT_JSON_BYTES);
+  assert.equal(contentJsonAtLimit.byteLength, MAX_CONTENT_JSON_BYTES);
+  assert.doesNotThrow(() => newPublish("news", contentJsonAtLimit));
+  expectCode(
+    () => newPublish("news", validJsonBytes(MAX_CONTENT_JSON_BYTES + 1)),
+    ErrorCode.MESSAGE_TOO_LARGE,
+  );
+
+  const subscriptionsAtLimit = Array.from(
+    { length: MAX_SUBSCRIPTIONS },
+    (_, index) => `channel-${String(index).padStart(4, "0")}`,
+  );
+  assert.equal(normalizeSubscriptions(subscriptionsAtLimit).length, MAX_SUBSCRIPTIONS);
+  assert.doesNotThrow(() => encodeSubscriptionsResponseDocument(subscriptionsAtLimit));
+  const subscriptionsOverLimit = [...subscriptionsAtLimit, `channel-${String(MAX_SUBSCRIPTIONS).padStart(4, "0")}`];
+  expectCode(() => normalizeSubscriptions(subscriptionsOverLimit), ErrorCode.INVALID_SUBSCRIPTIONS);
+  expectCode(() => encodeSubscriptionsResponseDocument(subscriptionsOverLimit), ErrorCode.INVALID_SUBSCRIPTIONS);
+
+  // 内层 document 和字段有更小的冻结上限，无法构造合法且恰好占满 MAX_WIRE_BYTES 的 Wire；
+  // 使用合法前缀加尾随字节，验证外层长度门槛是“超过”而不是“达到”。
+  const validWire = newSubscribe("x");
+  const wireAtLimit = new Uint8Array(MAX_WIRE_BYTES);
+  wireAtLimit.set(validWire);
+  expectCode(() => parse(wireAtLimit), ErrorCode.INVALID_WIRE);
+  const wireOverLimit = new Uint8Array(MAX_WIRE_BYTES + 1);
+  wireOverLimit.set(validWire);
+  expectCode(() => parse(wireOverLimit), ErrorCode.MESSAGE_TOO_LARGE);
 });
 
 test("subscription state fixtures and matching are exact", async () => {

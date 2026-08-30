@@ -33,3 +33,4 @@ if [[ ! -x "$repo_dir/typescript/node_modules/.bin/tsc" ]]; then
 fi
 (cd "$repo_dir/typescript" && npm run build)
 (cd "$example_dir" && npm ci --ignore-scripts && npm start)
+(cd "$repo_dir" && go run ./examples/go)
