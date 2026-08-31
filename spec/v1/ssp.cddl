@@ -1,36 +1,70 @@
 ; SSP V1 deterministic CBOR schema.
-; All arrays are definite-length arrays.  No maps, tags, floats, or
+; All arrays are definite-length arrays. No maps, tags, floats, or
 ; indefinite-length items are valid SSP values.
+;
+; Each outer branch binds wire_kind to the corresponding document_cbor.
+; The .cbor annotation makes the byte string a CBOR-encoded child document.
 
-ssp-wire = [wire-version, wire-kind, document-cbor]
+ssp-wire = publish-wire
+         / subscribe-wire
+         / unsubscribe-wire
+         / subscriptions-request-wire
+         / subscriptions-response-wire
+         / action-result-wire
+
 wire-version = 1
-wire-kind = 1 / 2 / 3 / 4 / 5
-document-cbor = bytes .size (1..1048512)
 
+publish-kind = 1
+subscribe-kind = 2
+unsubscribe-kind = 3
+subscriptions-request-kind = 4
+subscriptions-response-kind = 5
+action-result-kind = 6
+
+publish-wire = [wire-version, publish-kind, publish-document]
+subscribe-wire = [wire-version, subscribe-kind, subscribe-document]
+unsubscribe-wire = [wire-version, unsubscribe-kind, unsubscribe-document]
+subscriptions-request-wire = [wire-version, subscriptions-request-kind, subscriptions-request-document]
+subscriptions-response-wire = [wire-version, subscriptions-response-kind, subscriptions-response-document]
+action-result-wire = [wire-version, action-result-kind, action-result-document]
+
+publish-document = (bstr .cbor publish) .size (1..1048512)
+subscribe-document = (bstr .cbor subscribe) .size (1..1048512)
+unsubscribe-document = (bstr .cbor unsubscribe) .size (1..1048512)
+subscriptions-request-document = (bstr .cbor subscriptions-request) .size (1..1048512)
+subscriptions-response-document = (bstr .cbor subscriptions-response) .size (1..1048512)
+action-result-document = (bstr .cbor action-result) .size (1..1048512)
+
+request-id = bytes .size 32
 channel = text .size (1..256)
-content-json = bytes .size (0..1048000)
+content-json = bytes .size (1..1048000)
+charged-amount = text .size (1..64)
+action-error-code = "INVALID_REQUEST" / "REJECTED" / "INTERNAL_ERROR"
 
-; Kind 1: Publish（发布）
-publish-cbor = [channel, content-json]
+; Kind 1: Publish（发布请求或广播交付）
+publish = [request-id, channel, content-json]
 
 ; Kind 2: Subscribe（订阅）
-subscribe-cbor = [channel]
+subscribe = [request-id, channel]
 
 ; Kind 3: Unsubscribe（取消订阅）
-unsubscribe-cbor = [channel]
+unsubscribe = [request-id, channel]
 
 ; Kind 4: SubscriptionsRequest（查询订阅列表）
-subscriptions-request-cbor = []
+subscriptions-request = [request-id]
 
-; Kind 5: SubscriptionsResponse（返回订阅列表）
-subscriptions-response-cbor = [channels-cbor]
-channels-cbor = [*1024 channel]
+; Kind 5: SubscriptionsResponse（返回订阅列表和本次实际扣费）
+subscriptions-response = [request-id, charged-amount, channels]
+channels = [*1024 channel]
 
-; channel is a non-empty UTF-8 text string with at most 256 UTF-8 bytes.
-; The exact text "*" is allowed only in subscribe-cbor, unsubscribe-cbor,
-; and as the sole item of channels-cbor.
-; content-json is a byte string with at most 1048000 bytes containing one
-; complete RFC 8259 JSON value, with its original UTF-8 bytes preserved.
+; Kind 6: ActionResult（动作成功/失败和本次实际扣费）
+action-result = [request-id, true, charged-amount, ""] / [request-id, false, "0", action-error-code]
+
+; CDDL 能表达 Kind 与子文档绑定以及 ActionResult 的主要字段组合；
+; 金额规范十进制、channel 的 wildcard 位置、channels 排序和 content-json
+; 是否为完整 JSON 仍由 Go/TypeScript 运行时校验。
+; charged_amount 规范形式：无符号十进制、最多 18 位小数、无多余前导零、
+; 无小数末尾零；免费和失败固定为 "0"。
 
 ; Frozen SDK limits（冻结的 SDK 限制）:
 ; MaxWireBytes = 1048576（完整 Wire 最大 1 MiB）
@@ -38,3 +72,6 @@ channels-cbor = [*1024 channel]
 ; MaxChannelUTF8Bytes = 256（channel UTF-8 最大字节数）
 ; MaxContentJSONBytes = 1048000（JSON 原始字节最大长度）
 ; MaxSubscriptions = 1024（订阅集合最大元素数）
+; MaxAmountBytes = 64（金额 ASCII 最大字节数）
+; MaxAmountScale = 18（金额最大小数位数）
+; MaxRequestIDsPerSession = 65536（单 Stream 编号登记上限）

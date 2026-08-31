@@ -1,24 +1,185 @@
 {
   "version": 1,
   "cases": [
-    {"name": "unknown-version", "wire_hex": "8302014180", "expected_code": "UNSUPPORTED_VERSION"},
-    {"name": "unknown-kind", "wire_hex": "8301064180", "expected_code": "UNSUPPORTED_KIND"},
-    {"name": "outer-array-too-short", "wire_hex": "820101", "expected_code": "INVALID_WIRE"},
-    {"name": "outer-trailing-bytes", "wire_hex": "830104418000", "expected_code": "INVALID_WIRE"},
-    {"name": "non-canonical-version", "wire_hex": "831801044180", "expected_code": "NON_CANONICAL_CBOR"},
-    {"name": "publish-wildcard", "wire_hex": "8301014682612a417b7d", "expected_code": "INVALID_CHANNEL"},
-    {"name": "publish-empty-channel", "wire_hex": "830101458260417b7d", "expected_code": "INVALID_CHANNEL"},
-    {"name": "publish-invalid-channel-utf8", "wire_hex": "830101468261ff417b7d", "expected_code": "INVALID_CHANNEL"},
-    {"name": "publish-invalid-json", "wire_hex": "8301014882646e657773417b", "expected_code": "INVALID_JSON"},
-    {"name": "publish-invalid-json-utf8", "wire_hex": "8301014982646e65777342ffff", "expected_code": "INVALID_JSON"},
-    {"name": "publish-trailing-json", "wire_hex": "8301014a82646e657773437b7d78", "expected_code": "INVALID_JSON"},
-    {"name": "response-duplicate-channel", "wire_hex": "8301054c8182646e657773646e657773", "expected_code": "INVALID_SUBSCRIPTIONS"},
-    {"name": "response-unsorted-channel", "wire_hex": "8301054e8182646e65777366616c65727473", "expected_code": "INVALID_SUBSCRIPTIONS"},
-    {"name": "response-wildcard-mixed", "wire_hex": "830105498182612a646e657773", "expected_code": "INVALID_SUBSCRIPTIONS"},
-    {"name": "non-canonical-publish-array", "wire_hex": "83010158199802646e657773517b227469746c65223a2268656c6c6f227d", "expected_code": "NON_CANONICAL_CBOR"},
-    {"name": "non-canonical-response-text", "wire_hex": "83010548818178046e657773", "expected_code": "NON_CANONICAL_CBOR"},
-    {"name": "request-map-instead-of-array", "wire_hex": "83010441a0", "expected_code": "INVALID_WIRE"},
-    {"name": "document-is-text", "wire_hex": "8301016161", "expected_code": "INVALID_WIRE"},
-    {"name": "oversized-document-claim", "wire_hex": "8301015a00100000", "expected_code": "MESSAGE_TOO_LARGE"}
+    {
+      "name": "unknown-version",
+      "wire_hex": "8302014180",
+      "expected_code": "UNSUPPORTED_VERSION"
+    },
+    {
+      "name": "unknown-kind",
+      "wire_hex": "8301074180",
+      "expected_code": "UNSUPPORTED_KIND"
+    },
+    {
+      "name": "outer-array-too-short",
+      "wire_hex": "820101",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "outer-trailing-bytes",
+      "wire_hex": "830104418000",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "non-canonical-version",
+      "wire_hex": "831801044180",
+      "expected_code": "NON_CANONICAL_CBOR"
+    },
+    {
+      "name": "request-missing-request-id",
+      "wire_hex": "8301044180",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "request-id-wrong-length",
+      "wire_hex": "830104458143010203",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "publish-wildcard",
+      "wire_hex": "8301015828835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f612a427b7d",
+      "expected_code": "INVALID_CHANNEL"
+    },
+    {
+      "name": "publish-empty-channel",
+      "wire_hex": "8301015827835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f60427b7d",
+      "expected_code": "INVALID_CHANNEL"
+    },
+    {
+      "name": "publish-invalid-channel-utf8",
+      "wire_hex": "8301015828835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f61ff427b7d",
+      "expected_code": "INVALID_CHANNEL"
+    },
+    {
+      "name": "publish-invalid-json",
+      "wire_hex": "830101582a835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f646e657773417b",
+      "expected_code": "INVALID_JSON"
+    },
+    {
+      "name": "publish-invalid-json-utf8",
+      "wire_hex": "830101582b835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f646e65777342ffff",
+      "expected_code": "INVALID_JSON"
+    },
+    {
+      "name": "publish-trailing-json",
+      "wire_hex": "830101582c835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f646e657773437b7d78",
+      "expected_code": "INVALID_JSON"
+    },
+    {
+      "name": "response-duplicate-channel",
+      "wire_hex": "8301055830835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f613082646e657773646e657773",
+      "expected_code": "INVALID_SUBSCRIPTIONS"
+    },
+    {
+      "name": "response-unsorted-channel",
+      "wire_hex": "8301055832835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f613082646e65777366616c65727473",
+      "expected_code": "INVALID_SUBSCRIPTIONS"
+    },
+    {
+      "name": "response-wildcard-mixed",
+      "wire_hex": "830105582d835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f613082612a646e657773",
+      "expected_code": "INVALID_SUBSCRIPTIONS"
+    },
+    {
+      "name": "response-invalid-amount-leading-zero",
+      "wire_hex": "8301055827835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f62303080",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "response-invalid-amount-scale",
+      "wire_hex": "830105583a835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f75302e3030303030303030303030303030303030303180",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "response-invalid-amount-negative",
+      "wire_hex": "8301055827835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f622d3180",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "response-invalid-amount-positive-sign",
+      "wire_hex": "8301055827835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f622b3180",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "response-invalid-amount-trailing-zero",
+      "wire_hex": "8301055828835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f63312e3080",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "response-invalid-amount-fraction-trailing-zeros",
+      "wire_hex": "830105582b835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f66312e3233303080",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "response-invalid-amount-exponent",
+      "wire_hex": "8301055829835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f6431652d3380",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "response-invalid-amount-nineteen-decimal-places",
+      "wire_hex": "830105583a835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f75302e3030303030303030303030303030303030303180",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "response-invalid-amount-amount-too-long",
+      "wire_hex": "8301055867835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f7841313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313180",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "non-canonical-publish-array",
+      "wire_hex": "830101582c98025820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f646e657773427b7d",
+      "expected_code": "NON_CANONICAL_CBOR"
+    },
+    {
+      "name": "non-canonical-response-text",
+      "wire_hex": "830105582c835820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f61308178046e657773",
+      "expected_code": "NON_CANONICAL_CBOR"
+    },
+    {
+      "name": "action-success-with-error",
+      "wire_hex": "830106582f845820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1ff561306852454a4543544544",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "action-failure-with-charge",
+      "wire_hex": "830106582f845820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1ff461316852454a4543544544",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "action-failure-with-empty-error",
+      "wire_hex": "8301065827845820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1ff4613060",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "action-unknown-error",
+      "wire_hex": "830106582b845820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1ff46130644e4f5045",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "kind-publish-with-action-result-document",
+      "wire_hex": "830101582b8458200909090909090909090909090909090909090909090909090909090909090909f56531322e333460",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "kind-action-result-with-publish-document",
+      "wire_hex": "830106583a8358200000000000000000000000000000000000000000000000000000000000000000646e657773517b227469746c65223a2268656c6c6f227d",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "request-map-instead-of-array",
+      "wire_hex": "83010441a0",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "document-is-text",
+      "wire_hex": "8301016161",
+      "expected_code": "INVALID_WIRE"
+    },
+    {
+      "name": "oversized-document-claim",
+      "wire_hex": "8301015a00100000",
+      "expected_code": "MESSAGE_TOO_LARGE"
+    }
   ]
 }

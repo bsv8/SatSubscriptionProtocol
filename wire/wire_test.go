@@ -21,9 +21,13 @@ type wireFixture struct {
 type wireCase struct {
 	Name           string   `json:"name"`
 	Kind           uint64   `json:"kind"`
+	RequestIDHex   string   `json:"request_id_hex"`
 	Channel        string   `json:"channel"`
 	ContentJSONHex string   `json:"content_json_hex"`
+	ChargedAmount  string   `json:"charged_amount"`
 	Channels       []string `json:"channels"`
+	Success        bool     `json:"success"`
+	ErrorCode      string   `json:"error_code"`
 	WireHex        string   `json:"wire_hex"`
 }
 
@@ -77,9 +81,13 @@ func TestWireFixturesRoundTrip(t *testing.T) {
 			}
 			seenKinds[message.Kind] = true
 
+			requestID, err := hex.DecodeString(testCase.RequestIDHex)
+			if err != nil {
+				t.Fatal(err)
+			}
 			switch message.Kind {
 			case protocol.PublishKind:
-				publish, decodeErr := wire.DecodePublishDocument(message.Document)
+				publish, decodeErr := client.ParsePublish(input)
 				if decodeErr != nil {
 					t.Fatal(decodeErr)
 				}
@@ -87,21 +95,39 @@ func TestWireFixturesRoundTrip(t *testing.T) {
 				if decodeErr != nil {
 					t.Fatal(decodeErr)
 				}
-				if publish.Channel != testCase.Channel || string(publish.ContentJSON) != string(contentJSON) {
+				if publish.RequestID != mustRequestID(t, requestID) || publish.Channel != testCase.Channel || string(publish.ContentJSON) != string(contentJSON) {
 					t.Fatalf("Publish fields do not match fixture")
 				}
+			case protocol.SubscribeKind:
+				subscribe, decodeErr := wire.DecodeSubscribeDocument(message.Document)
+				if decodeErr != nil || subscribe.RequestID != mustRequestID(t, requestID) || subscribe.Channel != testCase.Channel {
+					t.Fatalf("Subscribe fields = %#v, err=%v", subscribe, decodeErr)
+				}
+			case protocol.UnsubscribeKind:
+				unsubscribe, decodeErr := wire.DecodeUnsubscribeDocument(message.Document)
+				if decodeErr != nil || unsubscribe.RequestID != mustRequestID(t, requestID) || unsubscribe.Channel != testCase.Channel {
+					t.Fatalf("Unsubscribe fields = %#v, err=%v", unsubscribe, decodeErr)
+				}
+			case protocol.SubscriptionsRequestKind:
+				request, decodeErr := wire.DecodeSubscriptionsRequestDocument(message.Document)
+				if decodeErr != nil || request.RequestID != mustRequestID(t, requestID) {
+					t.Fatalf("SubscriptionsRequest fields = %#v, err=%v", request, decodeErr)
+				}
 			case protocol.SubscriptionsResponseKind:
-				channels, decodeErr := wire.DecodeSubscriptionsResponseDocument(message.Document)
+				response, decodeErr := client.ParseSubscriptionsResponse(input)
 				if decodeErr != nil {
 					t.Fatal(decodeErr)
 				}
-				if len(channels) != len(testCase.Channels) {
-					t.Fatalf("channels = %#v, want %#v", channels, testCase.Channels)
+				if response.RequestID != mustRequestID(t, requestID) || response.ChargedAmount.String() != testCase.ChargedAmount || !sameStrings(response.Channels, testCase.Channels) {
+					t.Fatalf("SubscriptionsResponse = %#v", response)
 				}
-				for index := range channels {
-					if channels[index] != testCase.Channels[index] {
-						t.Fatalf("channels = %#v, want %#v", channels, testCase.Channels)
-					}
+			case protocol.ActionResultKind:
+				result, decodeErr := client.ParseActionResult(input)
+				if decodeErr != nil {
+					t.Fatal(decodeErr)
+				}
+				if result.RequestID != mustRequestID(t, requestID) || result.Success != testCase.Success || result.ChargedAmount.String() != testCase.ChargedAmount || result.ErrorCode != testCase.ErrorCode {
+					t.Fatalf("ActionResult = %#v", result)
 				}
 			}
 		})
@@ -112,6 +138,7 @@ func TestWireFixturesRoundTrip(t *testing.T) {
 		protocol.UnsubscribeKind,
 		protocol.SubscriptionsRequestKind,
 		protocol.SubscriptionsResponseKind,
+		protocol.ActionResultKind,
 	} {
 		if !seenKinds[kind] {
 			t.Errorf("fixture does not cover kind %d", kind)
@@ -140,9 +167,10 @@ func TestInvalidFixtureErrorCodes(t *testing.T) {
 }
 
 func TestDefensiveCopies(t *testing.T) {
+	id := mustRequestID(t, bytesOf(0x11))
 	content := []byte(" {\"n\":1} ")
 	originalContent := append([]byte(nil), content...)
-	encoded, err := client.NewPublish("news", content)
+	encoded, err := client.NewPublish(id, "news", content)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,4 +202,33 @@ func TestDefensiveCopies(t *testing.T) {
 	if !errors.Is(protocol.ErrInvalidJSON, protocol.ErrInvalidJSON) {
 		t.Fatal("sentinel sanity check failed")
 	}
+}
+
+func mustRequestID(t *testing.T, raw []byte) protocol.RequestID {
+	t.Helper()
+	result, err := protocol.NewRequestIDFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func bytesOf(value byte) []byte {
+	result := make([]byte, protocol.RequestIDBytes)
+	for index := range result {
+		result[index] = value
+	}
+	return result
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

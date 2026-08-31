@@ -113,13 +113,13 @@ func TestMemoryBackendConcurrentUpdatesAreAtomic(t *testing.T) {
 		channel := "channel-" + string(rune('a'+index%26)) + string(rune('0'+index/26))
 		go func() {
 			defer waitGroup.Done()
-			if err := backend.Subscribe(context.Background(), key, channel); err != nil {
+			if _, err := backend.Subscribe(context.Background(), key, testRequestID(), channel); err != nil {
 				t.Errorf("Subscribe failed: %v", err)
 			}
 		}()
 	}
 	waitGroup.Wait()
-	channels, err := backend.Subscriptions(context.Background(), key)
+	channels, _, err := backend.Subscriptions(context.Background(), key, testRequestID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,15 +129,21 @@ func TestMemoryBackendConcurrentUpdatesAreAtomic(t *testing.T) {
 
 	for index := 0; index < operations; index++ {
 		channel := "channel-" + string(rune('a'+index%26)) + string(rune('0'+index/26))
-		if err := backend.Subscribe(context.Background(), key, channel); err != nil {
+		if _, err := backend.Subscribe(context.Background(), key, testRequestID(), channel); err != nil {
 			t.Fatal(err)
 		}
 	}
-	channelsAfterRetry, err := backend.Subscriptions(context.Background(), key)
+	channelsAfterRetry, _, err := backend.Subscriptions(context.Background(), key, testRequestID())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(channelsAfterRetry) != operations {
 		t.Fatalf("idempotent channel count = %d, want %d", len(channelsAfterRetry), operations)
 	}
+}
+
+func testRequestID() protocol.RequestID {
+	var result protocol.RequestID
+	result[0] = 0x02
+	return result
 }

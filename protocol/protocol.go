@@ -3,6 +3,7 @@ package protocol
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,7 +28,7 @@ const (
 	// WireVersionV1 是 SSP V1 的 Wire 版本兼容别名。
 	WireVersionV1 Version = WireVersion
 
-	// PublishKind 表示发布或广播一条 JSON 消息。
+	// PublishKind 表示发布请求或向订阅者交付一条 JSON 广播。
 	PublishKind Kind = 1
 	// SubscribeKind 表示订阅一个普通 channel 或所有 channel。
 	SubscribeKind Kind = 2
@@ -37,6 +38,8 @@ const (
 	SubscriptionsRequestKind Kind = 4
 	// SubscriptionsResponseKind 表示返回当前订阅集合。
 	SubscriptionsResponseKind Kind = 5
+	// ActionResultKind 表示返回动作成功/失败及实际扣费金额。
+	ActionResultKind Kind = 6
 
 	// KindPublish 是 PublishKind 的语义化兼容别名。
 	KindPublish Kind = PublishKind
@@ -48,6 +51,17 @@ const (
 	KindSubscriptionsRequest Kind = SubscriptionsRequestKind
 	// KindSubscriptionsResponse 是 SubscriptionsResponseKind 的语义化兼容别名。
 	KindSubscriptionsResponse Kind = SubscriptionsResponseKind
+	// KindActionResult 是 ActionResultKind 的语义化兼容别名。
+	KindActionResult Kind = ActionResultKind
+
+	// RequestIDBytes 是 request_id 的固定字节长度。
+	RequestIDBytes = 32
+	// MaxAmountBytes 是 charged_amount 的完整 ASCII 字节上限。
+	MaxAmountBytes = 64
+	// MaxAmountScale 是 charged_amount 允许的小数位数上限。
+	MaxAmountScale = 18
+	// MaxRequestIDsPerSession 是单个 Stream Session 可登记的最大编号数量。
+	MaxRequestIDsPerSession = 65_536
 
 	// MaxWireBytes 是完整 SSP Wire 允许的最大字节数（1 MiB）。
 	MaxWireBytes = 1_048_576
@@ -87,6 +101,10 @@ const (
 	CodeBackendFailure ErrorCode = "BACKEND_FAILURE"
 	// CodeDispatchFailure 表示广播 Dispatcher 失败。
 	CodeDispatchFailure ErrorCode = "DISPATCH_FAILURE"
+	// CodeSessionLimit 表示 Session 已达到 request_id 登记上限。
+	CodeSessionLimit ErrorCode = "SESSION_LIMIT"
+	// CodeSessionClosed 表示 Session 已关闭。
+	CodeSessionClosed ErrorCode = "SESSION_CLOSED"
 )
 
 var (
@@ -112,11 +130,39 @@ var (
 	ErrBackendFailure = errors.New(string(CodeBackendFailure))
 	// ErrDispatchFailure 是 DISPATCH_FAILURE 的稳定 sentinel error。
 	ErrDispatchFailure = errors.New(string(CodeDispatchFailure))
+	// ErrSessionLimit 是 SESSION_LIMIT 的稳定本地 sentinel error。
+	ErrSessionLimit = errors.New(string(CodeSessionLimit))
+	// ErrSessionClosed 是 SESSION_CLOSED 的稳定本地 sentinel error。
+	ErrSessionClosed = errors.New(string(CodeSessionClosed))
+	// ErrRejected 表示 Backend 或 Dispatcher 明确拒绝了业务动作。
+	// 它不会直接编码到 Wire；Service 会将其映射为 ActionResult.REJECTED。
+	ErrRejected = errors.New("REJECTED")
+	// ErrRequestRejected 是 ErrRejected 的语义化别名。
+	ErrRequestRejected = ErrRejected
+)
+
+const (
+	// ActionErrorInvalidRequest 是 request_id 可识别但业务字段无效的线上错误码。
+	ActionErrorInvalidRequest = "INVALID_REQUEST"
+	// ActionErrorRejected 是余额、权限或服务策略拒绝的线上错误码。
+	ActionErrorRejected = "REJECTED"
+	// ActionErrorInternalError 是服务端内部处理失败的线上错误码。
+	ActionErrorInternalError = "INTERNAL_ERROR"
+	// InvalidRequestErrorCode 是 ActionErrorInvalidRequest 的兼容命名别名。
+	InvalidRequestErrorCode = ActionErrorInvalidRequest
+	// RejectedErrorCode 是 ActionErrorRejected 的兼容命名别名。
+	RejectedErrorCode = ActionErrorRejected
+	// InternalErrorCode 是 ActionErrorInternalError 的兼容命名别名。
+	InternalErrorCode = ActionErrorInternalError
 )
 
 // ErrorCodeOf 返回错误包含的稳定 SDK 错误分类。
 func ErrorCodeOf(err error) ErrorCode {
 	switch {
+	case errors.Is(err, ErrBackendFailure):
+		return CodeBackendFailure
+	case errors.Is(err, ErrDispatchFailure):
+		return CodeDispatchFailure
 	case errors.Is(err, ErrInvalidWire):
 		return CodeInvalidWire
 	case errors.Is(err, ErrUnsupportedVersion):
@@ -135,13 +181,160 @@ func ErrorCodeOf(err error) ErrorCode {
 		return CodeInvalidSubscriptions
 	case errors.Is(err, ErrInvalidPublicKey):
 		return CodeInvalidPublicKey
-	case errors.Is(err, ErrBackendFailure):
-		return CodeBackendFailure
-	case errors.Is(err, ErrDispatchFailure):
-		return CodeDispatchFailure
+	case errors.Is(err, ErrSessionLimit):
+		return CodeSessionLimit
+	case errors.Is(err, ErrSessionClosed):
+		return CodeSessionClosed
 	default:
 		return ""
 	}
+}
+
+// RequestID 是同一 Stream 内关联请求与响应的固定 32 字节编号。
+// 数组值本身不可通过外部切片修改；Bytes 返回的切片也是防御性副本。
+type RequestID [RequestIDBytes]byte
+
+// NewRequestID 使用操作系统安全随机源生成一个新的 request_id。
+func NewRequestID() (RequestID, error) {
+	var requestID RequestID
+	if _, err := rand.Read(requestID[:]); err != nil {
+		return RequestID{}, fmt.Errorf("generate request_id: %w", err)
+	}
+	return requestID, nil
+}
+
+// NewRequestIDFromBytes 校验并复制固定长度的 request_id。
+func NewRequestIDFromBytes(raw []byte) (RequestID, error) {
+	var requestID RequestID
+	if len(raw) != RequestIDBytes {
+		return requestID, fmt.Errorf("%w: request_id must be exactly %d bytes", ErrInvalidWire, RequestIDBytes)
+	}
+	copy(requestID[:], raw)
+	return requestID, nil
+}
+
+// RequestIDFromBytes 是 NewRequestIDFromBytes 的语义化别名。
+func RequestIDFromBytes(raw []byte) (RequestID, error) {
+	return NewRequestIDFromBytes(raw)
+}
+
+// Valid 判断 RequestID 是否具有固定长度。数组类型总是满足该长度要求。
+func (requestID RequestID) Valid() bool {
+	return len(requestID) == RequestIDBytes
+}
+
+// Bytes 返回 request_id 的防御性副本。
+func (requestID RequestID) Bytes() []byte {
+	result := make([]byte, RequestIDBytes)
+	copy(result, requestID[:])
+	return result
+}
+
+// CloneRequestID 返回 request_id 的值副本，便于表达防御性复制语义。
+func CloneRequestID(requestID RequestID) RequestID {
+	return requestID
+}
+
+// Amount 是规范化的精确十进制金额字符串。
+// 它不提供 float32/float64 构造接口，线上金额不会经过二进制浮点。
+type Amount string
+
+// ZeroAmount 是免费或失败结果的规范金额编码。
+const ZeroAmount Amount = "0"
+
+// NewAmount 校验并创建规范十进制金额。
+func NewAmount(value string) (Amount, error) {
+	if err := ValidateAmount(value); err != nil {
+		return "", err
+	}
+	return Amount(value), nil
+}
+
+// ValidateAmount 校验 charged_amount 的精确十进制规范。
+func ValidateAmount(value string) error {
+	if len(value) == 0 || len(value) > MaxAmountBytes {
+		return fmt.Errorf("%w: amount must contain 1..%d ASCII bytes", ErrInvalidWire, MaxAmountBytes)
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] > 0x7f {
+			return fmt.Errorf("%w: amount must be ASCII", ErrInvalidWire)
+		}
+	}
+
+	dot := -1
+	for index := 0; index < len(value); index++ {
+		switch value[index] {
+		case '.':
+			if dot >= 0 {
+				return fmt.Errorf("%w: amount has more than one decimal point", ErrInvalidWire)
+			}
+			dot = index
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		default:
+			return fmt.Errorf("%w: amount contains a forbidden character", ErrInvalidWire)
+		}
+	}
+
+	integerEnd := len(value)
+	if dot >= 0 {
+		integerEnd = dot
+		fractionLength := len(value) - dot - 1
+		if fractionLength == 0 || fractionLength > MaxAmountScale {
+			return fmt.Errorf("%w: amount scale must be 1..%d digits", ErrInvalidWire, MaxAmountScale)
+		}
+		if value[len(value)-1] == '0' {
+			return fmt.Errorf("%w: amount must not have trailing fractional zero", ErrInvalidWire)
+		}
+	}
+	if integerEnd == 0 {
+		return fmt.Errorf("%w: amount requires integer digits before decimal point", ErrInvalidWire)
+	}
+	if value[0] == '0' && integerEnd != 1 {
+		return fmt.Errorf("%w: amount has unnecessary leading zero", ErrInvalidWire)
+	}
+	for index := 0; index < integerEnd; index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return fmt.Errorf("%w: amount integer part is invalid", ErrInvalidWire)
+		}
+	}
+	return nil
+}
+
+// Valid 判断 Amount 是否已经是规范十进制金额。
+func (amount Amount) Valid() bool {
+	return ValidateAmount(string(amount)) == nil
+}
+
+// String 返回金额的规范十进制字符串。
+func (amount Amount) String() string {
+	return string(amount)
+}
+
+// IsActionErrorCode 判断线上 ActionResult 错误码是否属于 V1 固定集合。
+func IsActionErrorCode(code string) bool {
+	switch code {
+	case ActionErrorInvalidRequest, ActionErrorRejected, ActionErrorInternalError:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateActionResult 校验 ActionResult 的字段组合。
+func ValidateActionResult(result ActionResult) error {
+	if err := ValidateAmount(result.ChargedAmount.String()); err != nil {
+		return err
+	}
+	if result.Success {
+		if result.ErrorCode != "" {
+			return fmt.Errorf("%w: successful ActionResult must have empty error_code", ErrInvalidWire)
+		}
+		return nil
+	}
+	if result.ChargedAmount != ZeroAmount || !IsActionErrorCode(result.ErrorCode) {
+		return fmt.Errorf("%w: failed ActionResult must have charged_amount 0 and a fixed error_code", ErrInvalidWire)
+	}
+	return nil
 }
 
 // PublicKey 是外层认证提供的 33 字节公钥字节；它不进入 SSP Wire。
@@ -174,10 +367,56 @@ func (key PublicKey) Bytes() []byte {
 
 // Publish 是已验证的 Publish 文档；ContentJSON 始终保存原始 JSON 字节。
 type Publish struct {
+	// RequestID 是同一 Stream 内关联 Publish 请求及响应的编号。
+	RequestID RequestID
 	// Channel 是精确匹配的普通 channel 名称。
 	Channel string
 	// ContentJSON 是完整 JSON 文本的原始 UTF-8 字节，不会被重新序列化。
 	ContentJSON []byte
+}
+
+// Subscribe 是已验证的 Subscribe 文档。
+type Subscribe struct {
+	// RequestID 是同一 Stream 内关联订阅请求及响应的编号。
+	RequestID RequestID
+	// Channel 是要订阅的普通 channel 或全部 channel（"*"）。
+	Channel string
+}
+
+// Unsubscribe 是已验证的 Unsubscribe 文档。
+type Unsubscribe struct {
+	// RequestID 是同一 Stream 内关联取消订阅请求及响应的编号。
+	RequestID RequestID
+	// Channel 是要取消的普通 channel 或全部订阅（"*"）。
+	Channel string
+}
+
+// SubscriptionsRequest 是已验证的订阅列表查询文档。
+type SubscriptionsRequest struct {
+	// RequestID 是同一 Stream 内关联查询请求与列表响应的编号。
+	RequestID RequestID
+}
+
+// SubscriptionsResponse 是服务端返回的订阅集合和本次实际扣费。
+type SubscriptionsResponse struct {
+	// RequestID 是原样回显的查询请求编号。
+	RequestID RequestID
+	// ChargedAmount 是本次查询实际扣费的规范十进制金额。
+	ChargedAmount Amount
+	// Channels 是无重复、按 UTF-8 字节升序排列的订阅集合。
+	Channels []string
+}
+
+// ActionResult 是 Publish、Subscribe、Unsubscribe 及失败请求的统一结果。
+type ActionResult struct {
+	// RequestID 是原样回显的请求编号。
+	RequestID RequestID
+	// Success 表示动作是否成功。
+	Success bool
+	// ChargedAmount 是成功动作的实际扣费；失败固定为 "0"。
+	ChargedAmount Amount
+	// ErrorCode 成功固定为空；失败只能是三个 V1 稳定错误码之一。
+	ErrorCode string
 }
 
 // CloneBytes 返回字节切片的防御性副本；nil 输入仍返回 nil。
@@ -190,10 +429,10 @@ func CloneBytes(input []byte) []byte {
 	return output
 }
 
-// IsKind 判断 Kind 是否属于 SSP V1 的五种固定消息类型。
+// IsKind 判断 Kind 是否属于 SSP V1 的六种固定消息类型。
 func IsKind(kind Kind) bool {
 	switch kind {
-	case PublishKind, SubscribeKind, UnsubscribeKind, SubscriptionsRequestKind, SubscriptionsResponseKind:
+	case PublishKind, SubscribeKind, UnsubscribeKind, SubscriptionsRequestKind, SubscriptionsResponseKind, ActionResultKind:
 		return true
 	default:
 		return false

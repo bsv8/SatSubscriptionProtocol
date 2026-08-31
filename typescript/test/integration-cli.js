@@ -3,19 +3,25 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  ActionErrorCode,
   ErrorCode,
   Kind,
   MemoryBackend,
   RecordingDispatcher,
+  Session,
   encodeSubscriptionsResponseDocument,
   encodeWire,
   handleMessage,
   newPublish,
+  newActionResult,
+  newSubscriptionsResponse,
   newSubscribe,
   newSubscriptionsRequest,
   newUnsubscribe,
   normalizeSubscriptions,
   parse,
+  parseActionResult,
+  parseSubscriptionsResponse,
   matches,
   subscribe,
   unsubscribe,
@@ -61,6 +67,9 @@ async function run() {
     case "dispatch":
       value = await dispatchExchange();
       break;
+    case "billing":
+      value = await billingExchange();
+      break;
     default:
       throw new Error(`unknown mode ${mode}`);
   }
@@ -73,19 +82,31 @@ async function encodeFixtures() {
     let wire;
     switch (item.kind) {
       case Kind.Publish:
-        wire = newPublish(item.channel, fromHex(item.content_json_hex));
+        wire = newPublish(fromHex(item.request_id_hex), item.channel, fromHex(item.content_json_hex));
         break;
       case Kind.Subscribe:
-        wire = newSubscribe(item.channel);
+        wire = newSubscribe(fromHex(item.request_id_hex), item.channel);
         break;
       case Kind.Unsubscribe:
-        wire = newUnsubscribe(item.channel);
+        wire = newUnsubscribe(fromHex(item.request_id_hex), item.channel);
         break;
       case Kind.SubscriptionsRequest:
-        wire = newSubscriptionsRequest();
+        wire = newSubscriptionsRequest(fromHex(item.request_id_hex));
         break;
       case Kind.SubscriptionsResponse:
-        wire = encodeWire(Kind.SubscriptionsResponse, encodeSubscriptionsResponseDocument(item.channels));
+        wire = newSubscriptionsResponse({
+          requestId: fromHex(item.request_id_hex),
+          chargedAmount: item.charged_amount,
+          channels: item.channels,
+        });
+        break;
+      case Kind.ActionResult:
+        wire = newActionResult({
+          requestId: fromHex(item.request_id_hex),
+          success: item.success,
+          chargedAmount: item.charged_amount,
+          errorCode: item.error_code,
+        });
         break;
       default:
         throw new Error(`unknown fixture kind ${item.kind}`);
@@ -135,12 +156,103 @@ async function serviceExchange() {
     response_hex: toHex(result.response),
     has_response: Boolean(result.response),
     events: dispatcher.events().map((event) => ({
+      request_id_hex: toHex(event.requestId),
       publisher_public_key_hex: toHex(event.publisherPublicKey),
       channel: event.channel,
       content_json_hex: toHex(event.contentJson),
       wire_hex: toHex(event.wire),
     })),
   };
+}
+
+async function billingExchange() {
+  const fixture = await readFixture("billing-v1.json");
+  const key = fromHex(fixture.publisher_public_key_hex);
+  const memory = new MemoryBackend();
+  const backend = {
+    subscribe(remotePublicKey, requestId, channel) {
+      if (channel === "reject") {
+        throw Object.assign(new Error("余额不足"), { code: ActionErrorCode.REJECTED });
+      }
+      memory.subscribe(remotePublicKey, requestId, channel);
+      return "0";
+    },
+    unsubscribe(remotePublicKey, requestId, channel) {
+      memory.unsubscribe(remotePublicKey, requestId, channel);
+      return "0.001";
+    },
+    subscriptions(remotePublicKey, requestId) {
+      const result = memory.subscriptions(remotePublicKey, requestId);
+      return { channels: result.channels, chargedAmount: "12.34" };
+    },
+  };
+  const dispatcher = {
+    dispatch(event) {
+      if (event.channel === "internal") {
+        throw new Error("广播 Dispatcher 不可用");
+      }
+      return "1.2";
+    },
+  };
+  const session = new Session(key, backend, dispatcher);
+  try {
+    const result = [];
+    for (const item of fixture.cases) {
+      const requestWire = billingRequest(item);
+      const handled = await session.handleMessage(requestWire);
+      if (!handled.response) {
+        throw new Error(`billing service ${item.name} returned no response`);
+      }
+      validateBillingResponse(item, handled.response);
+      result.push({ name: item.name, response_hex: toHex(handled.response) });
+    }
+    return result;
+  } finally {
+    session.close();
+  }
+}
+
+function billingRequest(item) {
+  const requestId = fromHex(item.request_id_hex);
+  switch (item.kind) {
+    case Kind.Publish:
+      return newPublish(requestId, item.channel, fromHex(item.content_json_hex));
+    case Kind.Subscribe:
+      return newSubscribe(requestId, item.channel);
+    case Kind.Unsubscribe:
+      return newUnsubscribe(requestId, item.channel);
+    case Kind.SubscriptionsRequest:
+      return newSubscriptionsRequest(requestId);
+    default:
+      throw new Error(`billing fixture ${item.name} is not a client request kind`);
+  }
+}
+
+function validateBillingResponse(item, response) {
+  const message = parse(response);
+  if (message.kind !== item.expected_response_kind) {
+    throw new Error(`billing response ${item.name} kind=${message.kind}, want ${item.expected_response_kind}`);
+  }
+  if (message.kind === Kind.ActionResult) {
+    const result = parseActionResult(response);
+    if (toHex(result.requestId) !== item.request_id_hex
+      || result.success !== item.expected_success
+      || result.chargedAmount !== item.expected_charged_amount
+      || result.errorCode !== item.expected_error_code) {
+      throw new Error(`billing ActionResult ${item.name} does not match expected fields`);
+    }
+    return;
+  }
+  if (message.kind === Kind.SubscriptionsResponse) {
+    const result = parseSubscriptionsResponse(response);
+    if (toHex(result.requestId) !== item.request_id_hex
+      || result.chargedAmount !== item.expected_charged_amount
+      || JSON.stringify(result.channels) !== JSON.stringify(item.expected_channels)) {
+      throw new Error(`billing SubscriptionsResponse ${item.name} does not match expected fields`);
+    }
+    return;
+  }
+  throw new Error(`billing response ${item.name} uses unsupported response kind ${message.kind}`);
 }
 
 async function dispatchExchange() {

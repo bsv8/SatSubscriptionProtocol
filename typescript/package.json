@@ -40,7 +40,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "validate:cddl": "cddl validate ../spec/v1/ssp.cddl",
+    "validate:cddl": "node scripts/validate-cddl.mjs ../spec/v1/ssp.cddl",
     "test": "npm run validate:cddl && npm run build && node --test test/*.test.js"
   },
   "devDependencies": {

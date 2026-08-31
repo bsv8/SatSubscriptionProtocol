@@ -1,108 +1,174 @@
 # SSP SDK 使用说明
 
-## 发布端
+## 1. 客户端构造
 
-调用 `NewPublish(channel, contentJSON)` 创建完整 Wire。`channel` 必须是非空普通名称，
-不能是 `*`；`contentJSON` 必须是一份完整、合法的 UTF-8 JSON 文本。
+每个请求先由调用方生成唯一的 32 字节 request_id，再传给构造函数。SDK 不替调用方
+自动生成编号，这样并行请求可以由应用明确管理和关联。
 
-SDK 验证 JSON，但不会改写它。服务程序和订阅者收到的是发布端提供的 JSON exact bytes。
-如果应用传入语言对象，应先使用该语言稳定的 JSON 序列化器生成字节。
+Go：
 
-Publish 成功没有 SSP 响应报文。传输成功只表示服务程序收到消息，不表示任意订阅者
-已经接收。
+~~~go
+subscribeID, _ := client.NewRequestID()
+publishID, _ := client.NewRequestID()
 
-## 订阅端
+subscribeWire, err := client.NewSubscribe(subscribeID, "news")
+publishWire, err := client.NewPublish(publishID, "news", []byte("{\"title\":\"hello\"}"))
+~~~
 
-使用：
+正式签名：
 
-```text
-NewSubscribe(channel)          订阅普通 channel
-NewSubscribe("*")             订阅所有 channel
-NewUnsubscribe(channel)        取消普通 channel
-NewUnsubscribe("*")           清空全部订阅
-NewSubscriptionsRequest()      查询已订阅列表
-```
+~~~go
+client.NewPublish(requestID, channel, contentJSON) ([]byte, error)
+client.NewSubscribe(requestID, channel) ([]byte, error)
+client.NewUnsubscribe(requestID, channel) ([]byte, error)
+client.NewSubscriptionsRequest(requestID) ([]byte, error)
+client.ParsePublish(wireCBOR) (protocol.Publish, error)
+client.ParseActionResult(wireCBOR) (protocol.ActionResult, error)
+client.ParseSubscriptionsResponse(wireCBOR) (protocol.SubscriptionsResponse, error)
+~~~
 
-Subscribe 和 Unsubscribe 没有 SSP 响应报文。需要确认时，在同一条有序流中随后发送
-SubscriptionsRequest，并使用 `ParseSubscriptionsResponse` 解析返回。
+TypeScript：
 
-全频道订阅的列表固定为 `["*"]`。SSP 不支持从 `*` 中排除单个 channel；因此已订阅
-`*` 时，`Unsubscribe(channel)` 不改变状态。
+~~~ts
+const subscribeId = newRequestId();
+const publishId = newRequestId();
+const subscribeWire = newSubscribe(subscribeId, "news");
+const publishWire = newPublish(
+  publishId,
+  "news",
+  new TextEncoder().encode(' {"title":"hello"} '),
+);
+~~~
 
-收到 Publish 后，使用 `ParsePublish` 取得 `channel` 和原始 `contentJSON`。SDK 已完成
-Wire 和 JSON 格式验证，应用再按自己的 JSON 数据结构解析内容。
+对应签名为 newPublish(requestId, channel, contentJson)、newSubscribe(requestId,
+channel)、newUnsubscribe(requestId, channel)、newSubscriptionsRequest(requestId)、
+parsePublish、parseActionResult 和 parseSubscriptionsResponse。newRequestId()
+使用 Web Crypto/Node 的安全随机源，不使用 Math.random()。
 
-## 服务端
+content_json 必须是完整合法 JSON 的 UTF-8 字节；SDK 验证但不重排 JSON，收到的原始
+空白和字节会保留。Publish 不能使用 *；Subscribe/Unsubscribe 可以使用 *。
 
-外部 bitcoin-libp2p 应用先完成长期连接和身份认证，再调用：
+## 2. 长期 Stream 与并行响应
 
-```text
-HandleMessage(ctx, remote_public_key, payload, backend, dispatcher)
-```
+长期连接为每条 Stream 建立一个 Session：
 
-处理顺序：
+~~~go
+session := service.NewSession(remotePublicKey, backend, dispatcher)
+defer session.Close()
 
-1. 严格解析 SSP Wire；
-2. 使用验签成功或安全连接提供的 `remote_public_key`；
-3. Subscribe/Unsubscribe 原子更新该公钥的订阅集合；
-4. SubscriptionsRequest 返回规范排序的 SubscriptionsResponse；
-5. Publish 交给 dispatcher，向匹配的当前在线订阅者发送相同 Publish Wire。
+var wait sync.WaitGroup
+for _, payload := range [][]byte{subscribeWire, publishWire} {
+    wait.Add(1)
+    go func(payload []byte) {
+        defer wait.Done()
+        result, err := session.HandleMessage(context.Background(), payload)
+        if err != nil {
+            // 无法安全构造响应；是否结束连接由外部应用决定。
+            return
+        }
+        if result.HasResponse {
+            // 外部应用用一个串行 writer 写 result.Response。
+        }
+        if result.Cause != nil {
+            // 业务失败已有 ActionResult；只记录本地 Cause。
+            _ = errors.Is(result.Cause, protocol.ErrBackendFailure)
+        }
+    }(payload)
+}
+wait.Wait()
+~~~
 
-不能相信业务 payload 自报身份。Publish 的 `content_json` 必须使用收到的完整字节，不能
-解析后重新编码再广播。
+TypeScript：
 
-## 与 SPI 配合
+~~~ts
+const session = new Session(remotePublicKey, backend, dispatcher);
+const [subscribeResult, publishResult] = await Promise.all([
+  session.handleMessage(subscribeWire),
+  session.handleMessage(publishWire),
+]);
+~~~
 
-SSP Wire 中没有支付字段。服务程序可以在调用 `HandleMessage` 前后按自己的策略使用 SPI，
-并以同一个已认证公钥关联账户，但不要把 SPI Wire 包进 SSP Wire。
+不同 request_id 的业务可以并行，响应可以乱序；外部连接应用必须用一个串行 writer
+写出完整响应，客户端通过响应中的 request_id 关联，而不能依赖响应顺序。
 
-计费失败由外部应用处理。SSP v1 没有计费错误报文。
+成功响应规则：
 
-SSP SDK 不依赖 bitcoin-libp2p，也不实现连接、Stream、分帧或实际发送。外部应用只需把
-已认证公钥和完整 SSP Wire 交给 SDK，并把 SDK 返回的响应或广播事件写入自己的长期连接。
+- Publish、Subscribe、Unsubscribe：解析 ActionResult；
+- SubscriptionsRequest：解析唯一 SubscriptionsResponse；
+- 所有成功响应都有实际 charged_amount，金额是字符串，不转换成浮点数；
+- Publish 成功只表示服务端已接受、已扣费并开始广播，不代表任何订阅者已收到。
 
-Go 对应正式 API：
+如果 Subscribe 后要查询更新后的集合，应先收到对应 ActionResult，再发送查询请求。不同
+编号可并行不等于存在依赖的操作会自动排序。
 
-```go
-client.NewPublish(channel, contentJSON) ([]byte, error)          // 创建发布 Wire
-client.NewSubscribe(channel) ([]byte, error)                     // 创建订阅 Wire
-client.NewUnsubscribe(channel) ([]byte, error)                   // 创建取消订阅 Wire
-client.NewSubscriptionsRequest() ([]byte, error)                 // 创建查询 Wire
-client.ParsePublish(wireCBOR) (protocol.Publish, error)           // 解析原始 JSON 字节
-client.ParseSubscriptionsResponse(wireCBOR) ([]string, error)    // 解析规范订阅列表
-service.HandleMessage(ctx, remotePublicKey, wireCBOR, backend, dispatcher)
-                                                               // 处理已认证连接消息
-```
+## 3. 重复编号和结果字段
 
-TypeScript 对应正式 API（npm package `@bsv8/ssp`）：
+同一 Session 中重复提交相同编号会静默丢弃：不进入 Backend/Dispatcher、不扣费、不响应、
+不返回第一次结果。结果字段：
 
-```ts
-newPublish(channel, contentJson): Uint8Array                 // 创建发布 Wire
-newSubscribe(channel): Uint8Array                            // 创建订阅 Wire
-newUnsubscribe(channel): Uint8Array                          // 创建取消订阅 Wire
-newSubscriptionsRequest(): Uint8Array                        // 创建查询 Wire
-parsePublish(wireCbor): Publish                              // 解析原始 JSON 字节
-parseSubscriptionsResponse(wireCbor): readonly string[]      // 解析规范订阅列表
-handleMessage(remotePublicKey, wireCbor, backend, dispatcher) // 返回 { response?: Uint8Array }
-```
+~~~text
+Go:
+  Response    []byte   // 需要写回的完整 Wire
+  HasResponse bool     // 是否存在响应
+  Suppressed  bool     // 是否因重复 request_id 丢弃
+  Cause       error    // 仅本地诊断，不进入 Wire
 
-Go `protocol` 包导出 `MaxWireBytes = 1048576`、`MaxDocumentBytes = 1048512`、
-`MaxChannelUTF8Bytes = 256`、`MaxContentJSONBytes = 1048000` 和 `MaxSubscriptions = 1024`；
-TypeScript `protocol` 子入口导出对应的 `MAX_WIRE_BYTES`、`MAX_DOCUMENT_BYTES`、
-`MAX_CHANNEL_UTF8_BYTES`、`MAX_CONTENT_JSON_BYTES` 和 `MAX_SUBSCRIPTIONS`，以及保持跨语言命名的
-`MaxWireBytes`、`MaxDocumentBytes`、`MaxChannelUTF8Bytes`、`MaxContentJSONBytes`、
-`MaxSubscriptions` 别名。两端值固定一致。
+TypeScript:
+  response?: Uint8Array // 需要写回的完整 Wire
+  suppressed: boolean  // 是否因重复 request_id 丢弃
+  cause?: SSPError      // 仅本地诊断，不进入 Wire
+~~~
 
-Go 使用 `errors.Is` 检查 `protocol.ErrInvalidWire` 等 sentinel error；TypeScript 使用
-`SSPError.code`。错误只返回本地调用者，不编码为 SSP ErrorResponse。
+同一编号在新 Stream 中是新请求。每个 Session 最多登记 65536 个不同编号，第 65537 个
+新编号返回本地 SESSION_LIMIT；外部应用负责结束该 Stream。Close 后调用返回 SESSION_CLOSED。
 
-## 字段对照
+## 4. Backend、Dispatcher 与错误
 
-| 线上字段 | SDK 含义 | 中文含义 |
+Go 接口：
+
+~~~go
+type Backend interface {
+    Subscribe(ctx, publicKey, requestID, channel) (chargedAmount protocol.Amount, err error)
+    Unsubscribe(ctx, publicKey, requestID, channel) (chargedAmount protocol.Amount, err error)
+    Subscriptions(ctx, publicKey, requestID) (channels []string, chargedAmount protocol.Amount, err error)
+}
+
+type Dispatcher interface {
+    Dispatch(ctx, event PublishEvent) (chargedAmount protocol.Amount, err error)
+}
+~~~
+
+TypeScript SubscriptionBackend 的方法是 subscribe(publicKey, requestId, channel)、
+unsubscribe(publicKey, requestId, channel)、subscriptions(publicKey, requestId)；
+Dispatcher.dispatch(event) 返回实际 Amount。Backend/Dispatcher 自己保证收费与状态
+变更的原子事务，SDK 不读取价格文件和 SPI。
+
+业务失败仍返回失败 ActionResult：
+
+| ActionResult | 含义 |
+|---|---|
+| INVALID_REQUEST | request_id 可读但业务字段无效 |
+| REJECTED | 余额、权限或策略拒绝，不扣费 |
+| INTERNAL_ERROR | Backend、Dispatcher 或内部错误，不泄漏细节 |
+
+Go 的 Cause 会包装 ErrBackendFailure 或 ErrDispatchFailure 并保留原始错误，使用
+errors.Is/As 检查。业务失败时 Result.HasResponse 为 true、Result.Cause 非空，但返回
+error 为 nil；只有无法安全构造响应的错误才返回非空 error。TypeScript 的 cause 是
+SSPError，原异常在标准 Error.cause。本地错误和 cause 不编码进 Wire。
+
+金额与 SPI 的整数余额换算见 [SPI 集成与金额换算](./SPI集成与金额换算.md)。
+
+## 5. 字段对照
+
+| 线上字段 | 类型 | 中文含义 |
 |---|---|---|
-| `wire_version` | 协议版本 | SSP Wire 版本 |
-| `wire_kind` | 消息类型 | Publish、订阅操作或列表查询/返回 |
-| `channel` | UTF-8 string | 精确匹配的 channel name，`*` 为全频道 |
-| `content_json` | raw bytes | 一份合法 JSON 文本的原始 UTF-8 字节 |
-| `channels` | string list | 规范排序的已订阅集合 |
-| `remote_public_key` | 外层认证结果 | 订阅状态所属的长期身份，不进入 SSP Wire |
+| wire_version | CBOR uint | SSP Wire 版本，V1 为 1 |
+| wire_kind | CBOR uint | 六种消息类型编号 |
+| request_id | CBOR bstr，32 字节 | 同一 Stream 内关联请求与响应 |
+| channel | CBOR tstr | 精确匹配的 channel；* 表示全频道操作 |
+| content_json | CBOR bstr | 完整合法 JSON 的原始 UTF-8 字节 |
+| charged_amount | CBOR tstr | 实际扣费的精确十进制字符串 |
+| success | CBOR bool | ActionResult 动作是否成功 |
+| error_code | CBOR tstr | INVALID_REQUEST/REJECTED/INTERNAL_ERROR |
+| channels | CBOR tstr 数组 | 无重复、按 UTF-8 字节升序的订阅集合 |
+| remote_public_key | 外层认证输入 | 订阅状态所属身份，不进入 SSP Wire |

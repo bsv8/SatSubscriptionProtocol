@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "publisher_public_key_hex": "023333333333333333333333333333333333333333333333333333333333333333",
+  "cases": [
+    {
+      "name": "subscribe-free",
+      "kind": 2,
+      "request_id_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "channel": "news",
+      "expected_response_kind": 6,
+      "expected_success": true,
+      "expected_charged_amount": "0",
+      "expected_error_code": ""
+    },
+    {
+      "name": "subscriptions-precise",
+      "kind": 4,
+      "request_id_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "expected_response_kind": 5,
+      "expected_charged_amount": "12.34",
+      "expected_channels": ["news"]
+    },
+    {
+      "name": "unsubscribe-small-unit",
+      "kind": 3,
+      "request_id_hex": "3333333333333333333333333333333333333333333333333333333333333333",
+      "channel": "news",
+      "expected_response_kind": 6,
+      "expected_success": true,
+      "expected_charged_amount": "0.001",
+      "expected_error_code": ""
+    },
+    {
+      "name": "publish-one-point-two",
+      "kind": 1,
+      "request_id_hex": "4444444444444444444444444444444444444444444444444444444444444444",
+      "channel": "news",
+      "content_json_hex": "207b226e223a317d20",
+      "expected_response_kind": 6,
+      "expected_success": true,
+      "expected_charged_amount": "1.2",
+      "expected_error_code": ""
+    },
+    {
+      "name": "subscribe-rejected",
+      "kind": 2,
+      "request_id_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+      "channel": "reject",
+      "expected_response_kind": 6,
+      "expected_success": false,
+      "expected_charged_amount": "0",
+      "expected_error_code": "REJECTED"
+    },
+    {
+      "name": "publish-internal-error",
+      "kind": 1,
+      "request_id_hex": "6666666666666666666666666666666666666666666666666666666666666666",
+      "channel": "internal",
+      "content_json_hex": "7b226e223a327d",
+      "expected_response_kind": 6,
+      "expected_success": false,
+      "expected_charged_amount": "0",
+      "expected_error_code": "INTERNAL_ERROR"
+    }
+  ]
+}

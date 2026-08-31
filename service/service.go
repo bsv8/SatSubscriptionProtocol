@@ -3,6 +3,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -11,8 +12,14 @@ import (
 	"github.com/bsv8/SatSubscriptionProtocol/wire"
 )
 
+// Backend 是按已认证 remote_public_key 持久化订阅并执行实际扣费的接口。
+// 每次方法调用都必须由外部实现保证检查、扣费和状态读取/写入的原子事务边界。
+type Backend = subscription.Backend
+
 // PublishEvent 是交给外部 Dispatcher 的完整 Publish 事件。
 type PublishEvent struct {
+	// RequestID 是发布请求编号；订阅者不应把它当作广播消息 ID。
+	RequestID protocol.RequestID
 	// PublisherPublicKey 是外层认证得到的发布者公钥，不来自 SSP payload。
 	PublisherPublicKey protocol.PublicKey
 	// Channel 是 Publish 的普通 channel。
@@ -24,108 +31,298 @@ type PublishEvent struct {
 }
 
 // Dispatcher 是窄广播回调接口，不包含任何网络或连接类型。
+// 成功返回值必须是服务端已经实际扣除的金额。
 type Dispatcher interface {
-	// Dispatch 接收一个已认证发布者和完整 Publish 事件。
-	Dispatch(ctx context.Context, event PublishEvent) error
+	// Dispatch 接收一个已认证发布者和完整 Publish 事件，并返回实际扣费金额。
+	Dispatch(ctx context.Context, event PublishEvent) (chargedAmount protocol.Amount, err error)
+}
+
+// Result 是一次 Session 请求的处理结果。
+type Result struct {
+	// Response 是需要外部应用写回原 Stream 的完整 SSP Wire。
+	Response []byte
+	// HasResponse 区分是否存在响应；false 时不得写入空报文。
+	HasResponse bool
+	// Suppressed 表示相同 request_id 已在本 Session 登记，本次被静默丢弃。
+	Suppressed bool
+	// Cause 是本地诊断用的稳定包装错误，不会进入 Response Wire。
+	// 业务失败仍然通过 ActionResult 返回；调用方可对 Cause 使用 errors.Is/As，
+	// 同时找到 BACKEND_FAILURE/DISPATCH_FAILURE 和 Backend/Dispatcher 原始错误。
+	Cause error
+}
+
+// SessionResult 是 Result 的语义化别名。
+type SessionResult = Result
+
+// Session 表示一个 Stream 的 request_id 登记范围。
+// Session 只保护编号登记，不串行化不同 request_id 的 Backend/Dispatcher 调用。
+type Session struct {
+	remotePublicKey protocol.PublicKey
+	backend         Backend
+	dispatcher      Dispatcher
+
+	mu     sync.Mutex
+	seen   map[protocol.RequestID]struct{}
+	closed bool
+}
+
+// NewSession 创建一个与单条 Stream 绑定的无网络 Session。
+// remotePublicKey 必须来自外层已认证连接；公钥形状错误会在 HandleMessage 时返回本地错误。
+func NewSession(remotePublicKey protocol.PublicKey, backend Backend, dispatcher Dispatcher) *Session {
+	return &Session{
+		remotePublicKey: remotePublicKey,
+		backend:         backend,
+		dispatcher:      dispatcher,
+		seen:            make(map[protocol.RequestID]struct{}),
+	}
+}
+
+// Close 关闭 Session 并释放本 Stream 的 request_id 登记集合。
+// 已经开始执行的业务调用不会被强行取消；之后的新调用返回 SESSION_CLOSED。
+func (session *Session) Close() {
+	if session == nil {
+		return
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	session.closed = true
+	session.seen = nil
 }
 
 // HandleMessage 处理一个来自已认证长期连接的完整 SSP Wire。
-// Subscribe、Unsubscribe、Publish 成功时返回 nil、false、nil；
-// SubscriptionsRequest 成功时返回需要写回同一连接的 Response Wire。
+// 不同 request_id 可并行执行；响应必须由外部应用通过单独 writer 串行写出。
+func (session *Session) HandleMessage(ctx context.Context, wireCBOR []byte) (Result, error) {
+	if session == nil {
+		return Result{}, fmt.Errorf("%w: nil Session", protocol.ErrSessionClosed)
+	}
+	if !session.remotePublicKey.Valid() {
+		return Result{}, fmt.Errorf("%w: remote public key is not a compressed key", protocol.ErrInvalidPublicKey)
+	}
+
+	// 先快速检查关闭状态，避免已关闭 Session 对格式错误输入返回错误分类不一致的结果。
+	session.mu.Lock()
+	if session.closed {
+		session.mu.Unlock()
+		return Result{}, fmt.Errorf("%w: Session is closed", protocol.ErrSessionClosed)
+	}
+	session.mu.Unlock()
+
+	// 这里只解析一次外层，并读取首字段 request_id；后续业务字段由 DecodeRequest 校验。
+	envelope, err := wire.ParseRequestEnvelope(wireCBOR)
+	if err != nil {
+		return Result{}, err
+	}
+
+	session.mu.Lock()
+	if session.closed {
+		session.mu.Unlock()
+		return Result{}, fmt.Errorf("%w: Session is closed", protocol.ErrSessionClosed)
+	}
+	if _, exists := session.seen[envelope.RequestID]; exists {
+		session.mu.Unlock()
+		return Result{Suppressed: true}, nil
+	}
+	if len(session.seen) >= protocol.MaxRequestIDsPerSession {
+		session.mu.Unlock()
+		return Result{}, fmt.Errorf("%w: request_id limit reached", protocol.ErrSessionLimit)
+	}
+	// 登记必须发生在任何 Backend/Dispatcher 调用之前；锁只覆盖这一小段。
+	session.seen[envelope.RequestID] = struct{}{}
+	session.mu.Unlock()
+
+	request, err := wire.DecodeRequest(envelope)
+	if err != nil {
+		return session.actionFailure(envelope.RequestID, protocol.ActionErrorInvalidRequest)
+	}
+
+	switch request.Kind {
+	case protocol.SubscribeKind:
+		return session.handleSubscribe(ctx, request.Subscribe)
+	case protocol.UnsubscribeKind:
+		return session.handleUnsubscribe(ctx, request.Unsubscribe)
+	case protocol.SubscriptionsRequestKind:
+		return session.handleSubscriptions(ctx, request.SubscriptionsRequest)
+	case protocol.PublishKind:
+		return session.handlePublish(ctx, request.Publish, wireCBOR)
+	default:
+		return Result{}, fmt.Errorf("%w: unsupported client request kind", protocol.ErrUnsupportedKind)
+	}
+}
+
+func (session *Session) handleSubscribe(ctx context.Context, request protocol.Subscribe) (Result, error) {
+	if session.backend == nil {
+		return session.actionFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("Subscribe", errors.New("subscription backend is required")))
+	}
+	amount, err := session.backend.Subscribe(ctx, session.remotePublicKey, request.RequestID, request.Channel)
+	if err != nil {
+		return session.actionFailureWithCause(request.RequestID, actionErrorCode(err), wrapBackendFailure("Subscribe", err))
+	}
+	if amountErr := protocol.ValidateAmount(amount.String()); amountErr != nil {
+		return session.actionFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("Subscribe returned invalid charged_amount", amountErr))
+	}
+	return session.actionSuccess(request.RequestID, amount)
+}
+
+func (session *Session) handleUnsubscribe(ctx context.Context, request protocol.Unsubscribe) (Result, error) {
+	if session.backend == nil {
+		return session.actionFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("Unsubscribe", errors.New("subscription backend is required")))
+	}
+	amount, err := session.backend.Unsubscribe(ctx, session.remotePublicKey, request.RequestID, request.Channel)
+	if err != nil {
+		return session.actionFailureWithCause(request.RequestID, actionErrorCode(err), wrapBackendFailure("Unsubscribe", err))
+	}
+	if amountErr := protocol.ValidateAmount(amount.String()); amountErr != nil {
+		return session.actionFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("Unsubscribe returned invalid charged_amount", amountErr))
+	}
+	return session.actionSuccess(request.RequestID, amount)
+}
+
+func (session *Session) handleSubscriptions(ctx context.Context, request protocol.SubscriptionsRequest) (Result, error) {
+	if session.backend == nil {
+		return session.actionFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("Subscriptions", errors.New("subscription backend is required")))
+	}
+	channels, amount, err := session.backend.Subscriptions(ctx, session.remotePublicKey, request.RequestID)
+	if err != nil {
+		return session.actionFailureWithCause(request.RequestID, actionErrorCode(err), wrapBackendFailure("Subscriptions", err))
+	}
+	normalized, normalizeErr := subscription.NormalizeSubscriptions(channels)
+	if normalizeErr != nil {
+		// Backend 返回非法集合是服务端依赖失败，不伪装成客户端 INVALID_REQUEST。
+		return session.actionFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("Subscriptions returned invalid channels", normalizeErr))
+	}
+	if amountErr := protocol.ValidateAmount(amount.String()); amountErr != nil {
+		return session.actionFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("Subscriptions returned invalid charged_amount", amountErr))
+	}
+	response := protocol.SubscriptionsResponse{
+		RequestID:     request.RequestID,
+		ChargedAmount: amount,
+		Channels:      normalized,
+	}
+	document, encodeErr := wire.EncodeSubscriptionsResponseDocument(response)
+	if encodeErr != nil {
+		return session.actionFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("Subscriptions response encoding", encodeErr))
+	}
+	encoded, encodeErr := wire.EncodeWire(protocol.SubscriptionsResponseKind, document)
+	if encodeErr != nil {
+		return session.actionFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("Subscriptions response Wire encoding", encodeErr))
+	}
+	return Result{Response: protocol.CloneBytes(encoded), HasResponse: true}, nil
+}
+
+func (session *Session) handlePublish(ctx context.Context, publish protocol.Publish, wireCBOR []byte) (Result, error) {
+	if session.dispatcher == nil {
+		return session.actionFailureWithCause(publish.RequestID, protocol.ActionErrorInternalError,
+			wrapDispatchFailure("Publish", errors.New("publish dispatcher is required")))
+	}
+	event := PublishEvent{
+		RequestID:          publish.RequestID,
+		PublisherPublicKey: session.remotePublicKey,
+		Channel:            publish.Channel,
+		ContentJSON:        protocol.CloneBytes(publish.ContentJSON),
+		Wire:               protocol.CloneBytes(wireCBOR),
+	}
+	amount, err := session.dispatcher.Dispatch(ctx, event)
+	if err != nil {
+		return session.actionFailureWithCause(publish.RequestID, actionErrorCode(err), wrapDispatchFailure("Publish", err))
+	}
+	if amountErr := protocol.ValidateAmount(amount.String()); amountErr != nil {
+		return session.actionFailureWithCause(publish.RequestID, protocol.ActionErrorInternalError,
+			wrapDispatchFailure("Publish returned invalid charged_amount", amountErr))
+	}
+	return session.actionSuccess(publish.RequestID, amount)
+}
+
+func (session *Session) actionSuccess(requestID protocol.RequestID, amount protocol.Amount) (Result, error) {
+	return session.encodeActionResult(protocol.ActionResult{
+		RequestID:     requestID,
+		Success:       true,
+		ChargedAmount: amount,
+		ErrorCode:     "",
+	})
+}
+
+func (session *Session) actionFailure(requestID protocol.RequestID, errorCode string) (Result, error) {
+	return session.actionFailureWithCause(requestID, errorCode, nil)
+}
+
+func (session *Session) actionFailureWithCause(requestID protocol.RequestID, errorCode string, cause error) (Result, error) {
+	result, err := session.encodeActionResult(protocol.ActionResult{
+		RequestID:     requestID,
+		Success:       false,
+		ChargedAmount: protocol.ZeroAmount,
+		ErrorCode:     errorCode,
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	result.Cause = cause
+	// ActionResult 已经可以安全写回；本地 cause 只放在 Result 中，不能让
+	// 连接层因非空 error 跳过响应或关闭整个 Stream。
+	return result, nil
+}
+
+func (session *Session) encodeActionResult(action protocol.ActionResult) (Result, error) {
+	document, err := wire.EncodeActionResultDocument(action)
+	if err != nil {
+		return Result{}, err
+	}
+	encoded, err := wire.EncodeWire(protocol.ActionResultKind, document)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Response: protocol.CloneBytes(encoded), HasResponse: true}, nil
+}
+
+func actionErrorCode(err error) string {
+	if errors.Is(err, protocol.ErrRejected) {
+		return protocol.ActionErrorRejected
+	}
+	return protocol.ActionErrorInternalError
+}
+
+// wrapBackendFailure 保留 Backend 原始错误，同时提供稳定的 BACKEND_FAILURE 分类。
+func wrapBackendFailure(operation string, cause error) error {
+	if cause == nil {
+		cause = errors.New(operation + " failed")
+	}
+	return fmt.Errorf("%w: %s: %w", protocol.ErrBackendFailure, operation, cause)
+}
+
+// wrapDispatchFailure 保留 Dispatcher 原始错误，同时提供稳定的 DISPATCH_FAILURE 分类。
+func wrapDispatchFailure(operation string, cause error) error {
+	if cause == nil {
+		cause = errors.New(operation + " failed")
+	}
+	return fmt.Errorf("%w: %s: %w", protocol.ErrDispatchFailure, operation, cause)
+}
+
+// HandleMessage 是单次调用便捷入口，返回与 Session 相同的 Result。
+// 长期 Stream 必须为每条连接复用 Session，以启用 request_id 重复抑制和上限保护。
+// 业务失败返回 Result.Response 和 Result.Cause，但 error 为 nil；只有无法安全构造响应的
+// 格式、身份、Session 或内部编码错误才返回非空 error。调用方应先按 HasResponse 写出
+// 响应，再记录 Result.Cause。
 func HandleMessage(
 	ctx context.Context,
 	remotePublicKey protocol.PublicKey,
 	wireCBOR []byte,
-	backend subscription.Backend,
+	backend Backend,
 	dispatcher Dispatcher,
-) (responseWireCBOR []byte, hasResponse bool, err error) {
-	if !remotePublicKey.Valid() {
-		return nil, false, fmt.Errorf("%w: remote public key is not a compressed key", protocol.ErrInvalidPublicKey)
-	}
-	message, err := wire.Parse(wireCBOR)
-	if err != nil {
-		return nil, false, err
-	}
-
-	switch message.Kind {
-	case protocol.SubscribeKind:
-		if backend == nil {
-			return nil, false, fmt.Errorf("%w: subscription backend is required", protocol.ErrBackendFailure)
-		}
-		channel, decodeErr := wire.DecodeSubscribeDocument(message.Document)
-		if decodeErr != nil {
-			return nil, false, decodeErr
-		}
-		if backendErr := backend.Subscribe(ctx, remotePublicKey, channel); backendErr != nil {
-			return nil, false, fmt.Errorf("%w: backend Subscribe failed", protocol.ErrBackendFailure)
-		}
-		return nil, false, nil
-
-	case protocol.UnsubscribeKind:
-		if backend == nil {
-			return nil, false, fmt.Errorf("%w: subscription backend is required", protocol.ErrBackendFailure)
-		}
-		channel, decodeErr := wire.DecodeUnsubscribeDocument(message.Document)
-		if decodeErr != nil {
-			return nil, false, decodeErr
-		}
-		if backendErr := backend.Unsubscribe(ctx, remotePublicKey, channel); backendErr != nil {
-			return nil, false, fmt.Errorf("%w: backend Unsubscribe failed", protocol.ErrBackendFailure)
-		}
-		return nil, false, nil
-
-	case protocol.SubscriptionsRequestKind:
-		if backend == nil {
-			return nil, false, fmt.Errorf("%w: subscription backend is required", protocol.ErrBackendFailure)
-		}
-		if decodeErr := wire.DecodeSubscriptionsRequestDocument(message.Document); decodeErr != nil {
-			return nil, false, decodeErr
-		}
-		channels, backendErr := backend.Subscriptions(ctx, remotePublicKey)
-		if backendErr != nil {
-			return nil, false, fmt.Errorf("%w: backend Subscriptions failed", protocol.ErrBackendFailure)
-		}
-		normalized, normalizeErr := subscription.NormalizeSubscriptions(channels)
-		if normalizeErr != nil {
-			return nil, false, normalizeErr
-		}
-		document, encodeErr := wire.EncodeSubscriptionsResponseDocument(normalized)
-		if encodeErr != nil {
-			return nil, false, encodeErr
-		}
-		response, encodeErr := wire.EncodeWire(protocol.SubscriptionsResponseKind, document)
-		if encodeErr != nil {
-			return nil, false, encodeErr
-		}
-		return protocol.CloneBytes(response), true, nil
-
-	case protocol.PublishKind:
-		if dispatcher == nil {
-			return nil, false, fmt.Errorf("%w: publish dispatcher is required", protocol.ErrDispatchFailure)
-		}
-		publish, decodeErr := wire.DecodePublishDocument(message.Document)
-		if decodeErr != nil {
-			return nil, false, decodeErr
-		}
-		event := PublishEvent{
-			PublisherPublicKey: remotePublicKey,
-			Channel:            publish.Channel,
-			ContentJSON:        protocol.CloneBytes(publish.ContentJSON),
-			Wire:               protocol.CloneBytes(wireCBOR),
-		}
-		if dispatchErr := dispatcher.Dispatch(ctx, event); dispatchErr != nil {
-			return nil, false, fmt.Errorf("%w: dispatcher rejected publish", protocol.ErrDispatchFailure)
-		}
-		return nil, false, nil
-
-	case protocol.SubscriptionsResponseKind:
-		return nil, false, fmt.Errorf("%w: SubscriptionsResponse is not a client command", protocol.ErrInvalidWire)
-	default:
-		return nil, false, fmt.Errorf("%w: unsupported message kind", protocol.ErrUnsupportedKind)
-	}
+) (Result, error) {
+	session := NewSession(remotePublicKey, backend, dispatcher)
+	defer session.Close()
+	return session.HandleMessage(ctx, wireCBOR)
 }
 
-// RecordingDispatcher 是只记录事件的线程安全 Dispatcher，仅用于测试和示例。
+// RecordingDispatcher 是只记录事件并返回免费金额的线程安全 Dispatcher，仅用于测试和示例。
 type RecordingDispatcher struct {
 	mu     sync.Mutex
 	events []PublishEvent
@@ -136,14 +333,14 @@ func NewRecordingDispatcher() *RecordingDispatcher {
 	return &RecordingDispatcher{}
 }
 
-// Dispatch 记录事件并复制所有可变字节切片。
-func (dispatcher *RecordingDispatcher) Dispatch(_ context.Context, event PublishEvent) error {
+// Dispatch 记录事件并复制所有可变字节切片；示例实现不收费。
+func (dispatcher *RecordingDispatcher) Dispatch(_ context.Context, event PublishEvent) (protocol.Amount, error) {
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()
 	event.ContentJSON = protocol.CloneBytes(event.ContentJSON)
 	event.Wire = protocol.CloneBytes(event.Wire)
 	dispatcher.events = append(dispatcher.events, event)
-	return nil
+	return protocol.ZeroAmount, nil
 }
 
 // Events 返回已记录事件的深度副本。

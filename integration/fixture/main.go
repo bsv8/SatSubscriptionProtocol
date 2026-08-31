@@ -23,9 +23,13 @@ type wireFixture struct {
 type wireCase struct {
 	Name           string   `json:"name"`
 	Kind           uint64   `json:"kind"`
+	RequestIDHex   string   `json:"request_id_hex"`
 	Channel        string   `json:"channel"`
 	ContentJSONHex string   `json:"content_json_hex"`
+	ChargedAmount  string   `json:"charged_amount"`
 	Channels       []string `json:"channels"`
+	Success        bool     `json:"success"`
+	ErrorCode      string   `json:"error_code"`
 }
 
 type exchangeCase struct {
@@ -115,10 +119,34 @@ type eventExchange struct {
 }
 
 type eventSnapshot struct {
+	RequestIDHex          string `json:"request_id_hex"`
 	PublisherPublicKeyHex string `json:"publisher_public_key_hex"`
 	Channel               string `json:"channel"`
 	ContentJSONHex        string `json:"content_json_hex"`
 	WireHex               string `json:"wire_hex"`
+}
+
+type billingFixture struct {
+	PublisherPublicKeyHex string        `json:"publisher_public_key_hex"`
+	Cases                 []billingCase `json:"cases"`
+}
+
+type billingCase struct {
+	Name                  string   `json:"name"`
+	Kind                  uint64   `json:"kind"`
+	RequestIDHex          string   `json:"request_id_hex"`
+	Channel               string   `json:"channel"`
+	ContentJSONHex        string   `json:"content_json_hex"`
+	ExpectedResponseKind  uint64   `json:"expected_response_kind"`
+	ExpectedSuccess       bool     `json:"expected_success"`
+	ExpectedChargedAmount string   `json:"expected_charged_amount"`
+	ExpectedErrorCode     string   `json:"expected_error_code"`
+	ExpectedChannels      []string `json:"expected_channels"`
+}
+
+type billingExchangeCase struct {
+	Name        string `json:"name"`
+	ResponseHex string `json:"response_hex"`
 }
 
 type dispatchExchange struct {
@@ -134,7 +162,6 @@ type matchResult struct {
 func main() {
 	mode := flag.String("mode", "", "exchange mode")
 	inputPath := flag.String("input", "", "input JSON path for decode mode")
-	_ = flag.Bool("billing", false, "ignored external billing gate used to prove Wire stability")
 	flag.Parse()
 
 	var value any
@@ -152,6 +179,8 @@ func main() {
 		value, err = serviceExchangeResult()
 	case "dispatch":
 		value, err = dispatchExchangeResult()
+	case "billing":
+		value, err = billingExchangeResult()
 	default:
 		err = fmt.Errorf("unknown mode %q", *mode)
 	}
@@ -190,19 +219,53 @@ func encodeFixtures() ([]exchangeCase, error) {
 		var err error
 		switch protocol.Kind(item.Kind) {
 		case protocol.PublishKind:
-			wireBytes, err = client.NewPublish(item.Channel, mustHex(item.ContentJSONHex))
+			requestID, requestErr := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			wireBytes, err = client.NewPublish(requestID, item.Channel, mustHex(item.ContentJSONHex))
 		case protocol.SubscribeKind:
-			wireBytes, err = client.NewSubscribe(item.Channel)
+			requestID, requestErr := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			wireBytes, err = client.NewSubscribe(requestID, item.Channel)
 		case protocol.UnsubscribeKind:
-			wireBytes, err = client.NewUnsubscribe(item.Channel)
+			requestID, requestErr := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			wireBytes, err = client.NewUnsubscribe(requestID, item.Channel)
 		case protocol.SubscriptionsRequestKind:
-			wireBytes, err = client.NewSubscriptionsRequest()
+			requestID, requestErr := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			wireBytes, err = client.NewSubscriptionsRequest(requestID)
 		case protocol.SubscriptionsResponseKind:
 			var document []byte
-			document, err = wire.EncodeSubscriptionsResponseDocument(item.Channels)
+			requestID, requestErr := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			document, err = wire.EncodeSubscriptionsResponseDocument(protocol.SubscriptionsResponse{
+				RequestID: requestID, ChargedAmount: protocol.Amount(item.ChargedAmount), Channels: item.Channels,
+			})
 			if err == nil {
 				wireBytes, err = wire.EncodeWire(protocol.SubscriptionsResponseKind, document)
 			}
+		case protocol.ActionResultKind:
+			requestID, requestErr := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			document, documentErr := wire.EncodeActionResultDocument(protocol.ActionResult{
+				RequestID: requestID, Success: item.Success, ChargedAmount: protocol.Amount(item.ChargedAmount), ErrorCode: item.ErrorCode,
+			})
+			if documentErr != nil {
+				return nil, documentErr
+			}
+			wireBytes, err = wire.EncodeWire(protocol.ActionResultKind, document)
 		default:
 			return nil, fmt.Errorf("fixture %s has unknown kind", item.Name)
 		}
@@ -305,14 +368,15 @@ func serviceExchangeResult() (eventExchange, error) {
 	}
 	backend := subscription.NewMemoryBackend()
 	dispatcher := service.NewRecordingDispatcher()
-	response, hasResponse, err := service.HandleMessage(context.Background(), key, mustHex(fixture.PublishEvent.WireHex), backend, dispatcher)
+	handled, err := service.HandleMessage(context.Background(), key, mustHex(fixture.PublishEvent.WireHex), backend, dispatcher)
 	if err != nil {
 		return eventExchange{}, err
 	}
-	result := eventExchange{HasResponse: hasResponse}
-	result.Response = hex.EncodeToString(response)
+	result := eventExchange{HasResponse: handled.HasResponse}
+	result.Response = hex.EncodeToString(handled.Response)
 	for _, event := range dispatcher.Events() {
 		result.Events = append(result.Events, eventSnapshot{
+			RequestIDHex:          hex.EncodeToString(event.RequestID.Bytes()),
 			PublisherPublicKeyHex: hex.EncodeToString(event.PublisherPublicKey.Bytes()),
 			Channel:               event.Channel,
 			ContentJSONHex:        hex.EncodeToString(event.ContentJSON),
@@ -320,6 +384,135 @@ func serviceExchangeResult() (eventExchange, error) {
 		})
 	}
 	return result, nil
+}
+
+func billingExchangeResult() ([]billingExchangeCase, error) {
+	var fixture billingFixture
+	if err := readJSON(fixturePath("billing-v1.json"), &fixture); err != nil {
+		return nil, err
+	}
+	key, err := protocol.NewPublicKey(mustHex(fixture.PublisherPublicKeyHex))
+	if err != nil {
+		return nil, err
+	}
+	backend := &billingBackend{memory: subscription.NewMemoryBackend()}
+	session := service.NewSession(key, backend, billingDispatcher{})
+	defer session.Close()
+
+	result := make([]billingExchangeCase, 0, len(fixture.Cases))
+	for _, item := range fixture.Cases {
+		requestWire, requestErr := encodeBillingRequest(item)
+		if requestErr != nil {
+			return nil, fmt.Errorf("billing request %s: %w", item.Name, requestErr)
+		}
+		handled, handleErr := session.HandleMessage(context.Background(), requestWire)
+		if handleErr != nil {
+			return nil, fmt.Errorf("billing service %s: %w", item.Name, handleErr)
+		}
+		if !handled.HasResponse {
+			return nil, fmt.Errorf("billing service %s returned no response", item.Name)
+		}
+		if responseErr := validateBillingResponse(item, handled.Response); responseErr != nil {
+			return nil, responseErr
+		}
+		result = append(result, billingExchangeCase{
+			Name:        item.Name,
+			ResponseHex: hex.EncodeToString(handled.Response),
+		})
+	}
+	return result, nil
+}
+
+func encodeBillingRequest(item billingCase) ([]byte, error) {
+	requestID, err := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+	if err != nil {
+		return nil, err
+	}
+	switch protocol.Kind(item.Kind) {
+	case protocol.PublishKind:
+		return client.NewPublish(requestID, item.Channel, mustHex(item.ContentJSONHex))
+	case protocol.SubscribeKind:
+		return client.NewSubscribe(requestID, item.Channel)
+	case protocol.UnsubscribeKind:
+		return client.NewUnsubscribe(requestID, item.Channel)
+	case protocol.SubscriptionsRequestKind:
+		return client.NewSubscriptionsRequest(requestID)
+	default:
+		return nil, fmt.Errorf("billing fixture %s is not a client request kind", item.Name)
+	}
+}
+
+func validateBillingResponse(item billingCase, response []byte) error {
+	message, err := wire.Parse(response)
+	if err != nil {
+		return fmt.Errorf("billing response %s is invalid: %w", item.Name, err)
+	}
+	if uint64(message.Kind) != item.ExpectedResponseKind {
+		return fmt.Errorf("billing response %s kind=%d, want %d", item.Name, message.Kind, item.ExpectedResponseKind)
+	}
+	requestID, err := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+	if err != nil {
+		return err
+	}
+	switch message.Kind {
+	case protocol.ActionResultKind:
+		result, parseErr := client.ParseActionResult(response)
+		if parseErr != nil {
+			return fmt.Errorf("billing ActionResult %s: %w", item.Name, parseErr)
+		}
+		if result.RequestID != requestID || result.Success != item.ExpectedSuccess || result.ChargedAmount.String() != item.ExpectedChargedAmount || result.ErrorCode != item.ExpectedErrorCode {
+			return fmt.Errorf("billing ActionResult %s does not match expected fields", item.Name)
+		}
+	case protocol.SubscriptionsResponseKind:
+		result, parseErr := client.ParseSubscriptionsResponse(response)
+		if parseErr != nil {
+			return fmt.Errorf("billing SubscriptionsResponse %s: %w", item.Name, parseErr)
+		}
+		if result.RequestID != requestID || result.ChargedAmount.String() != item.ExpectedChargedAmount || !sameStrings(result.Channels, item.ExpectedChannels) {
+			return fmt.Errorf("billing SubscriptionsResponse %s does not match expected fields", item.Name)
+		}
+	default:
+		return fmt.Errorf("billing response %s uses unsupported response kind %d", item.Name, message.Kind)
+	}
+	return nil
+}
+
+type billingBackend struct {
+	memory *subscription.MemoryBackend
+}
+
+func (backend *billingBackend) Subscribe(ctx context.Context, key protocol.PublicKey, requestID protocol.RequestID, channel string) (protocol.Amount, error) {
+	if channel == "reject" {
+		return "", protocol.ErrRejected
+	}
+	if _, err := backend.memory.Subscribe(ctx, key, requestID, channel); err != nil {
+		return "", err
+	}
+	return protocol.ZeroAmount, nil
+}
+
+func (backend *billingBackend) Unsubscribe(ctx context.Context, key protocol.PublicKey, requestID protocol.RequestID, channel string) (protocol.Amount, error) {
+	if _, err := backend.memory.Unsubscribe(ctx, key, requestID, channel); err != nil {
+		return "", err
+	}
+	return protocol.Amount("0.001"), nil
+}
+
+func (backend *billingBackend) Subscriptions(ctx context.Context, key protocol.PublicKey, requestID protocol.RequestID) ([]string, protocol.Amount, error) {
+	channels, _, err := backend.memory.Subscriptions(ctx, key, requestID)
+	if err != nil {
+		return nil, "", err
+	}
+	return channels, protocol.Amount("12.34"), nil
+}
+
+type billingDispatcher struct{}
+
+func (billingDispatcher) Dispatch(_ context.Context, event service.PublishEvent) (protocol.Amount, error) {
+	if event.Channel == "internal" {
+		return "", fmt.Errorf("broadcast dispatcher unavailable")
+	}
+	return protocol.Amount("1.2"), nil
 }
 
 func dispatchExchangeResult() (dispatchExchange, error) {

@@ -13,21 +13,21 @@ import (
 func TestFrozenLimitBoundaries(t *testing.T) {
 	t.Run("channel UTF-8 bytes", func(t *testing.T) {
 		atLimit := repeatedChannel(protocol.MaxChannelUTF8Bytes)
-		if _, err := client.NewSubscribe(atLimit); err != nil {
+		if _, err := client.NewSubscribe(testRequestID(), atLimit); err != nil {
 			t.Fatalf("channel at limit was rejected: %v", err)
 		}
 
-		_, err := client.NewSubscribe(repeatedChannel(protocol.MaxChannelUTF8Bytes + 1))
+		_, err := client.NewSubscribe(testRequestID(), repeatedChannel(protocol.MaxChannelUTF8Bytes+1))
 		requireErrorCode(t, err, protocol.CodeInvalidChannel)
 	})
 
 	t.Run("content JSON bytes", func(t *testing.T) {
 		atLimit := validJSONString(protocol.MaxContentJSONBytes)
-		if _, err := client.NewPublish("news", atLimit); err != nil {
+		if _, err := client.NewPublish(testRequestID(), "news", atLimit); err != nil {
 			t.Fatalf("content_json at limit was rejected: %v", err)
 		}
 
-		_, err := client.NewPublish("news", validJSONString(protocol.MaxContentJSONBytes+1))
+		_, err := client.NewPublish(testRequestID(), "news", validJSONString(protocol.MaxContentJSONBytes+1))
 		requireErrorCode(t, err, protocol.CodeMessageTooLarge)
 	})
 
@@ -40,20 +40,24 @@ func TestFrozenLimitBoundaries(t *testing.T) {
 		if len(normalized) != protocol.MaxSubscriptions {
 			t.Fatalf("normalized subscription count = %d, want %d", len(normalized), protocol.MaxSubscriptions)
 		}
-		if _, err := wire.EncodeSubscriptionsResponseDocument(atLimit); err != nil {
+		if _, err := wire.EncodeSubscriptionsResponseDocument(protocol.SubscriptionsResponse{
+			RequestID: testRequestID(), ChargedAmount: protocol.ZeroAmount, Channels: atLimit,
+		}); err != nil {
 			t.Fatalf("response at subscription limit was rejected: %v", err)
 		}
 
 		overLimit := append(append([]string(nil), atLimit...), fmt.Sprintf("channel-%04d", protocol.MaxSubscriptions))
 		_, err = subscription.NormalizeSubscriptions(overLimit)
 		requireErrorCode(t, err, protocol.CodeInvalidSubscriptions)
-		_, err = wire.EncodeSubscriptionsResponseDocument(overLimit)
+		_, err = wire.EncodeSubscriptionsResponseDocument(protocol.SubscriptionsResponse{
+			RequestID: testRequestID(), ChargedAmount: protocol.ZeroAmount, Channels: overLimit,
+		})
 		requireErrorCode(t, err, protocol.CodeInvalidSubscriptions)
 	})
 }
 
 func TestFullWireLimitBoundary(t *testing.T) {
-	validWire, err := client.NewSubscribe("x")
+	validWire, err := client.NewSubscribe(testRequestID(), "x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,5 +107,11 @@ func boundaryChannels(count int) []string {
 	for index := range result {
 		result[index] = fmt.Sprintf("channel-%04d", index)
 	}
+	return result
+}
+
+func testRequestID() protocol.RequestID {
+	var result protocol.RequestID
+	result[0] = 0x02
 	return result
 }

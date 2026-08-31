@@ -6,12 +6,12 @@ export const WIRE_VERSION = 1 as const;
 export const WireVersion = WIRE_VERSION;
 /** 与 Go SDK 对齐的发布版本，从 0.1.0 开始。 */
 export const SDK_VERSION = "0.1.0" as const;
-/** SDKVersion 的跨语言命名别名。 */
+/** SDK_VERSION 的跨语言命名别名。 */
 export const SDKVersion = SDK_VERSION;
 
-/** SSP Wire 的五种固定消息类型。 */
+/** SSP V1 的六种固定消息类型。 */
 export const Kind = {
-  /** Publish（发布/广播）。 */
+  /** Publish（发布请求或广播交付）。 */
   Publish: 1,
   /** Subscribe（订阅）。 */
   Subscribe: 2,
@@ -19,14 +19,16 @@ export const Kind = {
   Unsubscribe: 3,
   /** SubscriptionsRequest（查询订阅列表）。 */
   SubscriptionsRequest: 4,
-  /** SubscriptionsResponse（返回订阅列表）。 */
+  /** SubscriptionsResponse（返回订阅列表和实际扣费）。 */
   SubscriptionsResponse: 5,
+  /** ActionResult（返回动作成功/失败和实际扣费）。 */
+  ActionResult: 6,
 } as const;
 
 /** SSP Wire Kind 数值类型。 */
 export type WireKind = (typeof Kind)[keyof typeof Kind];
 
-/** 固定 Kind 的大写常量别名，数值与 Kind 对象完全相同。 */
+/** 固定 Kind 的大写常量别名。 */
 export const KIND_PUBLISH = Kind.Publish;
 /** Subscribe Kind 的大写常量别名。 */
 export const KIND_SUBSCRIBE = Kind.Subscribe;
@@ -36,7 +38,13 @@ export const KIND_UNSUBSCRIBE = Kind.Unsubscribe;
 export const KIND_SUBSCRIPTIONS_REQUEST = Kind.SubscriptionsRequest;
 /** SubscriptionsResponse Kind 的大写常量别名。 */
 export const KIND_SUBSCRIPTIONS_RESPONSE = Kind.SubscriptionsResponse;
+/** ActionResult Kind 的大写常量别名。 */
+export const KIND_ACTION_RESULT = Kind.ActionResult;
 
+/** request_id 的固定字节长度。 */
+export const REQUEST_ID_BYTES = 32;
+/** request_id 的跨语言命名别名。 */
+export const RequestIDBytes = REQUEST_ID_BYTES;
 /** 完整 Wire 最大字节数（1 MiB）。 */
 export const MAX_WIRE_BYTES = 1_048_576;
 /** 外层 document_cbor 最大字节数。 */
@@ -47,6 +55,12 @@ export const MAX_CHANNEL_UTF8_BYTES = 256;
 export const MAX_CONTENT_JSON_BYTES = 1_048_000;
 /** 一个身份的订阅集合最大元素数。 */
 export const MAX_SUBSCRIPTIONS = 1_024;
+/** charged_amount 的完整 ASCII 字节上限。 */
+export const MAX_AMOUNT_BYTES = 64;
+/** charged_amount 的最大小数位数。 */
+export const MAX_AMOUNT_SCALE = 18;
+/** 单个 Stream Session 可登记的最大 request_id 数量。 */
+export const MAX_REQUEST_IDS_PER_SESSION = 65_536;
 
 /** MaxWireBytes 的跨语言命名别名。 */
 export const MaxWireBytes = MAX_WIRE_BYTES;
@@ -58,6 +72,12 @@ export const MaxChannelUTF8Bytes = MAX_CHANNEL_UTF8_BYTES;
 export const MaxContentJSONBytes = MAX_CONTENT_JSON_BYTES;
 /** MaxSubscriptions 的跨语言命名别名。 */
 export const MaxSubscriptions = MAX_SUBSCRIPTIONS;
+/** MaxAmountBytes 的跨语言命名别名。 */
+export const MaxAmountBytes = MAX_AMOUNT_BYTES;
+/** MaxAmountScale 的跨语言命名别名。 */
+export const MaxAmountScale = MAX_AMOUNT_SCALE;
+/** MaxRequestIDsPerSession 的跨语言命名别名。 */
+export const MaxRequestIDsPerSession = MAX_REQUEST_IDS_PER_SESSION;
 
 /** 跨语言稳定的 SDK 本地错误码。 */
 export const ErrorCode = {
@@ -83,19 +103,45 @@ export const ErrorCode = {
   BACKEND_FAILURE: "BACKEND_FAILURE",
   /** 广播 Dispatcher 失败。 */
   DISPATCH_FAILURE: "DISPATCH_FAILURE",
+  /** Session 已达到 request_id 登记上限。 */
+  SESSION_LIMIT: "SESSION_LIMIT",
+  /** Session 已关闭。 */
+  SESSION_CLOSED: "SESSION_CLOSED",
 } as const;
 
 /** 稳定 SDK 错误码类型。 */
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
 
-/** 带稳定 code 的 SDK 本地错误；message 不包含 content_json 原文。 */
+/** ActionResult 的三个固定线上错误码。 */
+export const ActionErrorCode = {
+  /** request_id 可识别但其他业务字段无效。 */
+  INVALID_REQUEST: "INVALID_REQUEST",
+  /** 余额、权限或服务策略拒绝。 */
+  REJECTED: "REJECTED",
+  /** Backend、Dispatcher 或服务端内部失败。 */
+  INTERNAL_ERROR: "INTERNAL_ERROR",
+} as const;
+
+/** ActionResult 线上错误码类型。 */
+export type ActionErrorCode = (typeof ActionErrorCode)[keyof typeof ActionErrorCode];
+
+/** 带稳定 code 和原始 cause 的 SDK 本地错误。 */
 export class SSPError extends Error {
   /** 稳定错误分类，Go 端可用 errors.Is 对应。 */
   readonly code: ErrorCode;
 
-  /** 创建一个带中文上下文的稳定 SDK 错误。 */
-  constructor(code: ErrorCode, message: string = code) {
-    super(message);
+  /** 以中文上下文创建错误，并保留原始异常到标准 Error.cause。 */
+  constructor(code: ErrorCode, options?: { cause?: unknown });
+  /** 以指定消息和 cause 创建错误。 */
+  constructor(code: ErrorCode, message?: string, options?: { cause?: unknown });
+  constructor(
+    code: ErrorCode,
+    messageOrOptions: string | { cause?: unknown } = code,
+    options: { cause?: unknown } = {},
+  ) {
+    const message = typeof messageOrOptions === "string" ? messageOrOptions : code;
+    const errorOptions = typeof messageOrOptions === "string" ? options : messageOrOptions;
+    super(message, errorOptions);
     this.name = "SSPError";
     this.code = code;
     Object.setPrototypeOf(this, new.target.prototype);
@@ -104,22 +150,166 @@ export class SSPError extends Error {
 
 /** 从未知异常中提取 SDK 稳定错误码。 */
 export function errorCode(error: unknown): ErrorCode | undefined {
-  if (error instanceof SSPError) {
-    return error.code;
-  }
-  return undefined;
+  return error instanceof SSPError ? error.code : undefined;
 }
 
-/** PublicKey 是外层认证提供的 33 字节公钥字节，不进入 SSP Wire。 */
-export type PublicKey = Uint8Array;
+/** request_id 的运行时类型；所有公开 API 都会复制它。 */
+export type RequestId = Uint8Array;
+/** RequestId 的大写命名兼容别名。 */
+export type RequestID = RequestId;
+
+/** 使用 Web Crypto 安全随机源生成 request_id。 */
+export function newRequestId(): RequestId {
+  const cryptoObject = globalThis.crypto;
+  if (!cryptoObject || typeof cryptoObject.getRandomValues !== "function") {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "当前运行环境没有可用的 Web Crypto 安全随机源");
+  }
+  return cloneBytes(cryptoObject.getRandomValues(new Uint8Array(REQUEST_ID_BYTES)));
+}
+
+/** 校验并复制固定 32 字节 request_id。 */
+export function validateRequestId(input: RequestId): RequestId {
+  if (!(input instanceof Uint8Array) || input.byteLength !== REQUEST_ID_BYTES) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, `request_id 必须是 ${REQUEST_ID_BYTES} 字节`);
+  }
+  return cloneBytes(input);
+}
 
 /** Publish 文档；contentJson 始终是原始 JSON UTF-8 字节。 */
 export interface Publish {
+  /** 同一 Stream 内关联请求和结果的编号。 */
+  readonly requestId: RequestId;
   /** 精确匹配的普通 channel 名称。 */
   readonly channel: string;
   /** 一份完整 JSON 文本的原始字节，不会被重新序列化。 */
   readonly contentJson: Uint8Array;
 }
+
+/** Subscribe 文档。 */
+export interface Subscribe {
+  /** 同一 Stream 内关联请求和结果的编号。 */
+  readonly requestId: RequestId;
+  /** 要订阅的普通 channel 或全部 channel（"*"）。 */
+  readonly channel: string;
+}
+
+/** Unsubscribe 文档。 */
+export interface Unsubscribe {
+  /** 同一 Stream 内关联请求和结果的编号。 */
+  readonly requestId: RequestId;
+  /** 要取消的普通 channel 或全部订阅（"*"）。 */
+  readonly channel: string;
+}
+
+/** SubscriptionsRequest 文档。 */
+export interface SubscriptionsRequest {
+  /** 同一 Stream 内关联查询和响应的编号。 */
+  readonly requestId: RequestId;
+}
+
+/** SubscriptionsResponse 文档。 */
+export interface SubscriptionsResponse {
+  /** 原样回显的查询请求编号。 */
+  readonly requestId: RequestId;
+  /** 本次实际扣费的规范十进制金额。 */
+  readonly chargedAmount: Amount;
+  /** 无重复、按 UTF-8 字节升序排列的订阅集合。 */
+  readonly channels: readonly string[];
+}
+
+/** ActionResult 文档。 */
+export interface ActionResult {
+  /** 原样回显的请求编号。 */
+  readonly requestId: RequestId;
+  /** 动作是否成功。 */
+  readonly success: boolean;
+  /** 成功时为实际扣费；失败固定为 "0"。 */
+  readonly chargedAmount: Amount;
+  /** 成功为空；失败只能是三个固定线上错误码。 */
+  readonly errorCode: "" | ActionErrorCode;
+}
+
+/** Amount 是规范化的精确十进制金额字符串，不使用 JavaScript number。 */
+export type Amount = string;
+
+/** 免费或失败结果的规范金额编码。 */
+export const ZERO_AMOUNT: Amount = "0";
+/** ZeroAmount 的跨语言命名别名。 */
+export const ZeroAmount = ZERO_AMOUNT;
+
+/** 校验 charged_amount 的精确十进制规范。 */
+export function validateAmount(value: Amount): void {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_AMOUNT_BYTES) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, `charged_amount 必须是 1..${MAX_AMOUNT_BYTES} 字节 ASCII 字符串`);
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) > 0x7f) {
+      throw new SSPError(ErrorCode.INVALID_WIRE, "charged_amount 必须是 ASCII");
+    }
+  }
+  let dot = -1;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === ".") {
+      if (dot >= 0) {
+        throw new SSPError(ErrorCode.INVALID_WIRE, "charged_amount 不能包含多个小数点");
+      }
+      dot = index;
+    } else if (character < "0" || character > "9") {
+      throw new SSPError(ErrorCode.INVALID_WIRE, "charged_amount 含有禁止字符");
+    }
+  }
+  const integerEnd = dot >= 0 ? dot : value.length;
+  if (dot >= 0) {
+    const fractionLength = value.length - dot - 1;
+    if (fractionLength === 0 || fractionLength > MAX_AMOUNT_SCALE) {
+      throw new SSPError(ErrorCode.INVALID_WIRE, `charged_amount 小数位必须为 1..${MAX_AMOUNT_SCALE}`);
+    }
+    if (value[value.length - 1] === "0") {
+      throw new SSPError(ErrorCode.INVALID_WIRE, "charged_amount 不能有小数末尾零");
+    }
+  }
+  if (integerEnd === 0) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "charged_amount 小数点前必须有整数位");
+  }
+  if (value[0] === "0" && integerEnd !== 1) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "charged_amount 不能有多余前导零");
+  }
+  for (let index = 0; index < integerEnd; index += 1) {
+    if (value[index] < "0" || value[index] > "9") {
+      throw new SSPError(ErrorCode.INVALID_WIRE, "charged_amount 整数部分无效");
+    }
+  }
+}
+
+/** 校验并返回规范金额字符串；不会转换成 number。 */
+export function newAmount(value: string): Amount {
+  validateAmount(value);
+  return value;
+}
+
+/** 判断 ActionResult 线上错误码是否有效。 */
+export function isActionErrorCode(value: string): value is ActionErrorCode {
+  return value === ActionErrorCode.INVALID_REQUEST || value === ActionErrorCode.REJECTED || value === ActionErrorCode.INTERNAL_ERROR;
+}
+
+/** 校验 ActionResult 的字段组合。 */
+export function validateActionResult(result: ActionResult): void {
+  validateRequestId(result.requestId);
+  validateAmount(result.chargedAmount);
+  if (result.success) {
+    if (result.errorCode !== "") {
+      throw new SSPError(ErrorCode.INVALID_WIRE, "成功 ActionResult 的 error_code 必须为空字符串");
+    }
+    return;
+  }
+  if (result.chargedAmount !== ZERO_AMOUNT || !isActionErrorCode(result.errorCode)) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "失败 ActionResult 必须使用 charged_amount=0 和固定错误码");
+  }
+}
+
+/** PublicKey 是外层认证提供的 33 字节公钥字节，不进入 SSP Wire。 */
+export type PublicKey = Uint8Array;
 
 /** 复制 Uint8Array，避免 SDK 输出与调用者输入共享可变内存。 */
 export function cloneBytes(input: Uint8Array): Uint8Array {
@@ -215,7 +405,7 @@ export function compareChannelsUtf8(left: string, right: string): number {
   return Math.sign(leftBytes.length - rightBytes.length);
 }
 
-/** 判断是否为五种固定 SSP Kind 之一。 */
+/** 判断是否为六种固定 SSP Kind 之一。 */
 export function isKind(kind: number): kind is WireKind {
-  return kind >= Kind.Publish && kind <= Kind.SubscriptionsResponse && Number.isInteger(kind);
+  return Number.isInteger(kind) && kind >= Kind.Publish && kind <= Kind.ActionResult;
 }

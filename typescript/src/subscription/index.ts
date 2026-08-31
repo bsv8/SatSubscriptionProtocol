@@ -3,20 +3,44 @@ import {
   compareChannelsUtf8,
   ErrorCode,
   MAX_SUBSCRIPTIONS,
+  Amount,
   PublicKey,
+  RequestId,
   SSPError,
   validateChannel,
   validatePublicKey,
 } from "../protocol/index.js";
 
-/** 按已认证 PublicKey 保存订阅状态的异步接口。 */
+/** Subscribe/Unsubscribe 成功时 Backend 返回的实际扣费结果。 */
+export type SubscriptionMutationResult = Amount | { readonly chargedAmount: Amount };
+
+/** Subscriptions 成功时 Backend 返回的列表和实际扣费结果。 */
+export interface SubscriptionQueryResult {
+  /** 同一事务边界读取的订阅列表。 */
+  readonly channels: readonly string[];
+  /** 同一事务边界实际扣除的金额。 */
+  readonly chargedAmount: Amount;
+}
+
+/** 按已认证 PublicKey 保存订阅状态并执行实际扣费的接口。 */
 export interface SubscriptionBackend {
-  /** 原子、幂等地添加一个 channel。 */
-  subscribe(remotePublicKey: PublicKey, channel: string): void | Promise<void>;
-  /** 原子、幂等地取消一个 channel。 */
-  unsubscribe(remotePublicKey: PublicKey, channel: string): void | Promise<void>;
-  /** 返回该身份订阅集合；SDK 会再次验证并复制列表。 */
-  subscriptions(remotePublicKey: PublicKey): readonly string[] | Promise<readonly string[]>;
+  /** 在同一事务中检查、扣费并添加 channel。 */
+  subscribe(
+    remotePublicKey: PublicKey,
+    requestId: RequestId,
+    channel: string,
+  ): SubscriptionMutationResult | Promise<SubscriptionMutationResult>;
+  /** 在同一事务中检查、扣费并取消 channel。 */
+  unsubscribe(
+    remotePublicKey: PublicKey,
+    requestId: RequestId,
+    channel: string,
+  ): SubscriptionMutationResult | Promise<SubscriptionMutationResult>;
+  /** 在同一事务中查询列表并扣费。 */
+  subscriptions(
+    remotePublicKey: PublicKey,
+    requestId: RequestId,
+  ): SubscriptionQueryResult | Promise<SubscriptionQueryResult>;
 }
 
 /** Backend 的语义化别名。 */
@@ -87,24 +111,26 @@ export function matches(channels: readonly string[], publishChannel: string): bo
 export class MemoryBackend implements SubscriptionBackend {
   private readonly states = new Map<string, string[]>();
 
-  /** 原子、幂等地更新内存订阅集合。 */
-  subscribe(remotePublicKey: PublicKey, channel: string): void {
+  /** 原子、幂等地更新内存订阅集合；内存示例固定免费。 */
+  subscribe(remotePublicKey: PublicKey, _requestId: RequestId, channel: string): Amount {
     const key = keyString(remotePublicKey);
     const current = this.states.get(key) ?? [];
     this.states.set(key, subscribe(current, channel));
+    return "0";
   }
 
-  /** 原子、幂等地更新内存订阅集合。 */
-  unsubscribe(remotePublicKey: PublicKey, channel: string): void {
+  /** 原子、幂等地更新内存订阅集合；内存示例固定免费。 */
+  unsubscribe(remotePublicKey: PublicKey, _requestId: RequestId, channel: string): Amount {
     const key = keyString(remotePublicKey);
     const current = this.states.get(key) ?? [];
     this.states.set(key, unsubscribe(current, channel));
+    return "0";
   }
 
-  /** 返回该身份的规范订阅集合新副本。 */
-  subscriptions(remotePublicKey: PublicKey): readonly string[] {
+  /** 返回该身份的规范订阅集合新副本；内存示例固定免费。 */
+  subscriptions(remotePublicKey: PublicKey, _requestId: RequestId): SubscriptionQueryResult {
     const key = keyString(remotePublicKey);
-    return normalizeSubscriptions(this.states.get(key) ?? []);
+    return { channels: normalizeSubscriptions(this.states.get(key) ?? []), chargedAmount: "0" };
   }
 }
 

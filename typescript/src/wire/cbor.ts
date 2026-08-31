@@ -118,10 +118,34 @@ export class Decoder {
     return result;
   }
 
+  /** 读取固定长度 byte string，长度错误统一归类为 INVALID_WIRE。 */
+  readFixedBytes(expected: number): Uint8Array {
+    const length = this.readHead(2);
+    if (length !== BigInt(expected)) {
+      throw new SSPError(ErrorCode.INVALID_WIRE, `CBOR byte string 必须是 ${expected} 字节`);
+    }
+    const size = expected;
+    if (this.data.byteLength - this.offset < size) {
+      throw new SSPError(ErrorCode.INVALID_WIRE, "CBOR 固定 byte string 不完整");
+    }
+    const result = this.data.slice(this.offset, this.offset + size);
+    this.offset += size;
+    return result;
+  }
+
   /** 读取并验证 UTF-8 text string。 */
   readText(maximum: number, errorCode: ErrorCode): string {
+    return this.readTextInternal(maximum, errorCode, false);
+  }
+
+  /** 读取允许空字符串的 UTF-8 text string。 */
+  readTextAllowEmpty(maximum: number, errorCode: ErrorCode): string {
+    return this.readTextInternal(maximum, errorCode, true);
+  }
+
+  private readTextInternal(maximum: number, errorCode: ErrorCode, allowEmpty: boolean): string {
     const length = this.readHead(3);
-    if (length === 0n || length > BigInt(maximum)) {
+    if ((!allowEmpty && length === 0n) || length > BigInt(maximum)) {
       throw new SSPError(errorCode, "CBOR text string 为空或超过长度限制");
     }
     const size = Number(length);
@@ -135,6 +159,23 @@ export class Decoder {
     } catch {
       throw new SSPError(errorCode, "CBOR text string 不是合法 UTF-8");
     }
+  }
+
+  /** 读取 canonical CBOR bool；只接受 false(0xf4) 和 true(0xf5)。 */
+  readBool(): boolean {
+    if (this.offset >= this.data.byteLength) {
+      throw new SSPError(ErrorCode.INVALID_WIRE, "CBOR bool 数据提前结束");
+    }
+    const value = this.data[this.offset];
+    if (value === 0xf4) {
+      this.offset += 1;
+      return false;
+    }
+    if (value === 0xf5) {
+      this.offset += 1;
+      return true;
+    }
+    throw new SSPError(ErrorCode.INVALID_WIRE, "ActionResult success 必须是 CBOR bool");
   }
 
   private readUnsigned(width: number): bigint {

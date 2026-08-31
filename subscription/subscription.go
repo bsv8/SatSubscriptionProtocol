@@ -113,12 +113,12 @@ func Matches(channels []string, publishChannel string) (bool, error) {
 
 // Backend 是按已认证 remote_public_key 持久化订阅集合的接口。
 type Backend interface {
-	// Subscribe 原子、幂等地添加一个订阅。
-	Subscribe(ctx context.Context, remotePublicKey protocol.PublicKey, channel string) error
-	// Unsubscribe 原子、幂等地取消一个订阅。
-	Unsubscribe(ctx context.Context, remotePublicKey protocol.PublicKey, channel string) error
-	// Subscriptions 返回该身份订阅集合的新副本。
-	Subscriptions(ctx context.Context, remotePublicKey protocol.PublicKey) ([]string, error)
+	// Subscribe 在同一事务边界中检查、扣费并写入订阅状态，返回实际扣费金额。
+	Subscribe(ctx context.Context, remotePublicKey protocol.PublicKey, requestID protocol.RequestID, channel string) (protocol.Amount, error)
+	// Unsubscribe 在同一事务边界中检查、扣费并写入订阅状态，返回实际扣费金额。
+	Unsubscribe(ctx context.Context, remotePublicKey protocol.PublicKey, requestID protocol.RequestID, channel string) (protocol.Amount, error)
+	// Subscriptions 在同一事务边界中查询并扣费，返回该事务读取的列表和实际扣费金额。
+	Subscriptions(ctx context.Context, remotePublicKey protocol.PublicKey, requestID protocol.RequestID) ([]string, protocol.Amount, error)
 }
 
 // SubscriptionBackend 是 Backend 的语义化兼容别名。
@@ -137,9 +137,9 @@ func NewMemoryBackend() *MemoryBackend {
 }
 
 // Subscribe 原子、幂等地更新内存中的订阅集合。
-func (backend *MemoryBackend) Subscribe(_ context.Context, remotePublicKey protocol.PublicKey, channel string) error {
+func (backend *MemoryBackend) Subscribe(_ context.Context, remotePublicKey protocol.PublicKey, _ protocol.RequestID, channel string) (protocol.Amount, error) {
 	if err := validateBackendKey(remotePublicKey); err != nil {
-		return err
+		return "", err
 	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
@@ -149,16 +149,16 @@ func (backend *MemoryBackend) Subscribe(_ context.Context, remotePublicKey proto
 	current := backend.subscriptions[remotePublicKey]
 	next, err := Subscribe(current, channel)
 	if err != nil {
-		return err
+		return "", err
 	}
 	backend.subscriptions[remotePublicKey] = next
-	return nil
+	return protocol.ZeroAmount, nil
 }
 
 // Unsubscribe 原子、幂等地更新内存中的订阅集合。
-func (backend *MemoryBackend) Unsubscribe(_ context.Context, remotePublicKey protocol.PublicKey, channel string) error {
+func (backend *MemoryBackend) Unsubscribe(_ context.Context, remotePublicKey protocol.PublicKey, _ protocol.RequestID, channel string) (protocol.Amount, error) {
 	if err := validateBackendKey(remotePublicKey); err != nil {
-		return err
+		return "", err
 	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
@@ -168,28 +168,28 @@ func (backend *MemoryBackend) Unsubscribe(_ context.Context, remotePublicKey pro
 	current := backend.subscriptions[remotePublicKey]
 	next, err := Unsubscribe(current, channel)
 	if err != nil {
-		return err
+		return "", err
 	}
 	backend.subscriptions[remotePublicKey] = next
-	return nil
+	return protocol.ZeroAmount, nil
 }
 
 // Subscriptions 返回内存 Backend 中该身份的规范订阅集合副本。
-func (backend *MemoryBackend) Subscriptions(_ context.Context, remotePublicKey protocol.PublicKey) ([]string, error) {
+func (backend *MemoryBackend) Subscriptions(_ context.Context, remotePublicKey protocol.PublicKey, _ protocol.RequestID) ([]string, protocol.Amount, error) {
 	if err := validateBackendKey(remotePublicKey); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	backend.mu.RLock()
 	defer backend.mu.RUnlock()
 	current, ok := backend.subscriptions[remotePublicKey]
 	if !ok {
-		return []string{}, nil
+		return []string{}, protocol.ZeroAmount, nil
 	}
 	result, err := NormalizeSubscriptions(current)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return result, nil
+	return result, protocol.ZeroAmount, nil
 }
 
 func validateBackendKey(remotePublicKey protocol.PublicKey) error {
