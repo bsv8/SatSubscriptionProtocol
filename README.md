@@ -134,6 +134,8 @@ Error.cause 保留原始异常；这些本地信息不会进入 ActionResult。
 - protocol/、wire/、client/、subscription/、service/：Go SDK；
 - typescript/：sat-subscription-protocol TypeScript SDK；
 - testdata/v1/：Go 与 TypeScript 共用的 Wire、状态、dispatch、billing、invalid fixture；
+- docs/三方频道/：SSP V1 之上的 Hash 请求与 WebRTC SDP 第三方频道约定；
+- channels/、scripts/test-channels.sh：三方频道 Go/TypeScript SDK 及仓库级验收入口；
 - docs/SPI集成与金额换算.md：SPI 整数余额与 SSP 精确小数金额的应用层换算；
 - integration/fixture/、scripts/test-integration.sh：无网络跨语言检查；
 - examples/：不启动网络的 Go/TypeScript 调用示例。
@@ -146,4 +148,5 @@ cd typescript && npm ci && npm test && npm run build && npm pack --dry-run
 ./scripts/validate-cddl.sh
 ./scripts/test-integration.sh
 ./scripts/test-examples.sh
+./scripts/test-channels.sh
 ~~~
