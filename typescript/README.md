@@ -1,4 +1,4 @@
-# @bsv8/ssp
+# sat-subscription-protocol
 
 SSP V1 的无网络核心 SDK。长期连接、身份认证、分帧和实际发送由外部应用负责；本包
 提供六种 deterministic CBOR Wire、订阅状态、精确金额和每 Stream 的 Session。
@@ -14,7 +14,7 @@ import {
   newRequestId,
   newSubscribe,
   parseActionResult,
-} from "@bsv8/ssp";
+} from "sat-subscription-protocol";
 
 // 必须来自外层已认证连接；这里仅使用形状正确的示例公钥。
 const remotePublicKey = new Uint8Array(33);
@@ -70,6 +70,6 @@ Go 的对应 Result 在业务失败时仍保留 Response 和 Cause，但返回 e
 先写响应，再记录 Cause。SPI 整数余额与 SSP 小数金额的应用层换算见仓库
 [SPI 集成与金额换算](../docs/SPI集成与金额换算.md)。
 
-根入口以及 @bsv8/ssp/protocol、@bsv8/ssp/wire、@bsv8/ssp/client、
-@bsv8/ssp/subscription、@bsv8/ssp/service 子入口均可用。字段、错误分类和 Go 对照
+根入口以及 sat-subscription-protocol/protocol、sat-subscription-protocol/wire、sat-subscription-protocol/client、
+sat-subscription-protocol/subscription、sat-subscription-protocol/service 子入口均可用。字段、错误分类和 Go 对照
 见仓库 [SDK 使用说明](../docs/SDK使用.md)。

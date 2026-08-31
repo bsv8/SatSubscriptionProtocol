@@ -1,5 +1,5 @@
 {
-  "name": "@bsv8/ssp",
+  "name": "sat-subscription-protocol",
   "version": "0.1.0",
   "description": "SSP V1 no-network subscription broadcast SDK（无网络订阅广播 SDK）",
   "license": "AGPL-3.0-only",

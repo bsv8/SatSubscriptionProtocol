@@ -6,6 +6,6 @@
     "start": "node main.mjs"
   },
   "dependencies": {
-    "@bsv8/ssp": "file:../../typescript"
+    "sat-subscription-protocol": "file:../../typescript"
   }
 }

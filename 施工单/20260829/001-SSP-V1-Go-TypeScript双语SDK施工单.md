@@ -112,7 +112,7 @@ SatSubscriptionProtocol/
 
 ```text
 Go module: github.com/bsv8/SatSubscriptionProtocol
-npm package: @bsv8/ssp
+npm package: sat-subscription-protocol
 ```
 
 如果 npm scope 或包名无法发布，停止并确认新名称，不得静默改名。

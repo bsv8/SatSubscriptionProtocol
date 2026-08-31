@@ -9,7 +9,7 @@ import {
   newSubscriptionsRequest,
   parseActionResult,
   parseSubscriptionsResponse,
-} from "@bsv8/ssp";
+} from "sat-subscription-protocol";
 
 // remotePublicKey 必须来自外部已认证长期连接；示例使用固定测试公钥。
 const remotePublicKey = new Uint8Array(33);

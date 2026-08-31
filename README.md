@@ -132,7 +132,7 @@ Error.cause 保留原始异常；这些本地信息不会进入 ActionResult。
 
 - spec/v1/ssp.cddl：V1 CDDL、字段和固定限制；
 - protocol/、wire/、client/、subscription/、service/：Go SDK；
-- typescript/：@bsv8/ssp TypeScript SDK；
+- typescript/：sat-subscription-protocol TypeScript SDK；
 - testdata/v1/：Go 与 TypeScript 共用的 Wire、状态、dispatch、billing、invalid fixture；
 - docs/SPI集成与金额换算.md：SPI 整数余额与 SSP 精确小数金额的应用层换算；
 - integration/fixture/、scripts/test-integration.sh：无网络跨语言检查；
