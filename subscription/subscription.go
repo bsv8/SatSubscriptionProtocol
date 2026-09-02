@@ -121,9 +121,6 @@ type Backend interface {
 	Subscriptions(ctx context.Context, remotePublicKey protocol.PublicKey, requestID protocol.RequestID) ([]string, protocol.Amount, error)
 }
 
-// SubscriptionBackend 是 Backend 的语义化兼容别名。
-type SubscriptionBackend = Backend
-
 // MemoryBackend 是线程安全的进程内 Backend，仅用于测试和示例。
 // 进程退出或实例重启后，所有状态都会丢失，不适合作为生产持久化实现。
 type MemoryBackend struct {

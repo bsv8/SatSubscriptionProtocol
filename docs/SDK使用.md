@@ -98,6 +98,14 @@ const [subscribeResult, publishResult] = await Promise.all([
 - 所有成功响应都有实际 charged_amount，金额是字符串，不转换成浮点数；
 - Publish 成功只表示服务端已接受、已扣费并开始广播，不代表任何订阅者已收到。
 
+上述 Publish ActionResult 只属于客户端 → Supplier 请求。生产 Dispatcher 向订阅者发送时：
+
+- 为订阅者 Stream 生成新的 delivery request_id，不复制第一跳 request_id；
+- channel 保持相同；
+- content_json 直接复用收到的 CP 原始字节，不 parse/stringify；
+- 订阅者把 Publish 当作交付事件，不返回 ActionResult；
+- 完整两跳 SSP Wire 不要求相同。
+
 如果 Subscribe 后要查询更新后的集合，应先收到对应 ActionResult，再发送查询请求。不同
 编号可并行不等于存在依赖的操作会自动排序。
 
@@ -138,10 +146,13 @@ type Dispatcher interface {
 }
 ~~~
 
-TypeScript SubscriptionBackend 的方法是 subscribe(publicKey, requestId, channel)、
+TypeScript Backend 的方法是 subscribe(publicKey, requestId, channel)、
 unsubscribe(publicKey, requestId, channel)、subscriptions(publicKey, requestId)；
 Dispatcher.dispatch(event) 返回实际 Amount。Backend/Dispatcher 自己保证收费与状态
-变更的原子事务，SDK 不读取价格文件和 SPI。
+变更的原子事务，SDK 不读取价格文件和 SPI。Session 只做当前 Stream 的重复抑制；生产
+实现还必须按 `(payer_id, request_id)` 索引并保存 deterministic SSP Wire 的 SHA-256
+`request_digest`：摘要相同的跨 Stream 重试返回原结果，摘要不同映射为 `REJECTED`；不同
+付款人的相同 request_id 独立收费。
 
 业务失败仍返回失败 ActionResult：
 

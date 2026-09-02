@@ -106,10 +106,10 @@ type onlineIdentity struct {
 }
 
 type publishEventFixture struct {
-	PublisherPublicKeyHex string `json:"publisher_public_key_hex"`
-	Channel               string `json:"channel"`
-	ContentJSONHex        string `json:"content_json_hex"`
-	WireHex               string `json:"wire_hex"`
+	PayerIDHex     string `json:"payer_id_hex"`
+	Channel        string `json:"channel"`
+	ContentJSONHex string `json:"content_json_hex"`
+	WireHex        string `json:"wire_hex"`
 }
 
 type eventExchange struct {
@@ -119,16 +119,15 @@ type eventExchange struct {
 }
 
 type eventSnapshot struct {
-	RequestIDHex          string `json:"request_id_hex"`
-	PublisherPublicKeyHex string `json:"publisher_public_key_hex"`
-	Channel               string `json:"channel"`
-	ContentJSONHex        string `json:"content_json_hex"`
-	WireHex               string `json:"wire_hex"`
+	RequestIDHex   string `json:"request_id_hex"`
+	PayerIDHex     string `json:"payer_id_hex"`
+	Channel        string `json:"channel"`
+	ContentJSONHex string `json:"content_json_hex"`
 }
 
 type billingFixture struct {
-	PublisherPublicKeyHex string        `json:"publisher_public_key_hex"`
-	Cases                 []billingCase `json:"cases"`
+	PayerIDHex string        `json:"payer_id_hex"`
+	Cases      []billingCase `json:"cases"`
 }
 
 type billingCase struct {
@@ -362,13 +361,15 @@ func serviceExchangeResult() (eventExchange, error) {
 	if err := readJSON(fixturePath("dispatch-v1.json"), &fixture); err != nil {
 		return eventExchange{}, err
 	}
-	key, err := protocol.NewPublicKey(mustHex(fixture.PublishEvent.PublisherPublicKeyHex))
+	key, err := protocol.NewPublicKey(mustHex(fixture.PublishEvent.PayerIDHex))
 	if err != nil {
 		return eventExchange{}, err
 	}
 	backend := subscription.NewMemoryBackend()
 	dispatcher := service.NewRecordingDispatcher()
-	handled, err := service.HandleMessage(context.Background(), key, mustHex(fixture.PublishEvent.WireHex), backend, dispatcher)
+	session := service.NewSession(key, backend, dispatcher)
+	defer session.Close()
+	handled, err := session.HandleMessage(context.Background(), mustHex(fixture.PublishEvent.WireHex))
 	if err != nil {
 		return eventExchange{}, err
 	}
@@ -376,11 +377,10 @@ func serviceExchangeResult() (eventExchange, error) {
 	result.Response = hex.EncodeToString(handled.Response)
 	for _, event := range dispatcher.Events() {
 		result.Events = append(result.Events, eventSnapshot{
-			RequestIDHex:          hex.EncodeToString(event.RequestID.Bytes()),
-			PublisherPublicKeyHex: hex.EncodeToString(event.PublisherPublicKey.Bytes()),
-			Channel:               event.Channel,
-			ContentJSONHex:        hex.EncodeToString(event.ContentJSON),
-			WireHex:               hex.EncodeToString(event.Wire),
+			RequestIDHex:   hex.EncodeToString(event.RequestID.Bytes()),
+			PayerIDHex:     hex.EncodeToString(event.PayerID.Bytes()),
+			Channel:        event.Channel,
+			ContentJSONHex: hex.EncodeToString(event.ContentJSON),
 		})
 	}
 	return result, nil
@@ -391,7 +391,7 @@ func billingExchangeResult() ([]billingExchangeCase, error) {
 	if err := readJSON(fixturePath("billing-v1.json"), &fixture); err != nil {
 		return nil, err
 	}
-	key, err := protocol.NewPublicKey(mustHex(fixture.PublisherPublicKeyHex))
+	key, err := protocol.NewPublicKey(mustHex(fixture.PayerIDHex))
 	if err != nil {
 		return nil, err
 	}

@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -65,7 +66,7 @@ func TestSessionReturnsActionResultsAndExactPublishEvent(t *testing.T) {
 		t.Fatalf("Publish ActionResult = %#v, %v", publishAction, err)
 	}
 	events := dispatcher.Events()
-	if len(events) != 1 || events[0].RequestID != publishID || events[0].PublisherPublicKey != key || events[0].Channel != "news" || string(events[0].ContentJSON) != string(content) || string(events[0].Wire) != string(publishWire) {
+	if len(events) != 1 || events[0].RequestID != publishID || events[0].PayerID != key || events[0].Channel != "news" || string(events[0].ContentJSON) != string(content) {
 		t.Fatalf("dispatcher event = %#v", events)
 	}
 
@@ -150,13 +151,13 @@ func TestSessionSuppressesConcurrentDuplicateAndAllowsDifferentIDsToRunInParalle
 	}
 }
 
-func TestSameRequestIDRunsAgainOnNewSession(t *testing.T) {
-	backend := &countingBackend{}
-	wireBytes, err := client.NewSubscribe(requestID(13), "news")
+func TestSessionSuppressesLocallyWhileDispatcherOwnsCrossSessionIdempotency(t *testing.T) {
+	dispatcher := &persistentDispatcher{}
+	wireBytes, err := client.NewPublish(requestID(13), "news", []byte(`{"n":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstSession := service.NewSession(fixedKey(), backend, service.NewRecordingDispatcher())
+	firstSession := service.NewSession(fixedKey(), nil, dispatcher)
 	firstResult, err := firstSession.HandleMessage(context.Background(), wireBytes)
 	if err != nil || !firstResult.HasResponse || firstResult.Suppressed {
 		t.Fatalf("first session result = %#v, %v", firstResult, err)
@@ -167,14 +168,33 @@ func TestSameRequestIDRunsAgainOnNewSession(t *testing.T) {
 	}
 	firstSession.Close()
 
-	secondSession := service.NewSession(fixedKey(), backend, service.NewRecordingDispatcher())
+	secondSession := service.NewSession(fixedKey(), nil, dispatcher)
 	secondResult, err := secondSession.HandleMessage(context.Background(), wireBytes)
 	if err != nil || !secondResult.HasResponse || secondResult.Suppressed {
 		t.Fatalf("new session result = %#v, %v", secondResult, err)
 	}
-	if backend.subscribeCalls() != 2 {
-		t.Fatalf("new session backend calls = %d, want 2", backend.subscribeCalls())
+	differentContentWire, err := client.NewPublish(requestID(13), "news", []byte(`{"n":2}`))
+	if err != nil {
+		t.Fatal(err)
 	}
+	differentContentSession := service.NewSession(fixedKey(), nil, dispatcher)
+	differentContentResult, err := differentContentSession.HandleMessage(context.Background(), differentContentWire)
+	if err != nil || !differentContentResult.HasResponse || differentContentResult.Suppressed {
+		t.Fatalf("same payer/request_id different content result = %#v, %v", differentContentResult, err)
+	}
+	differentPayer := fixedKey()
+	differentPayer[1] = 14
+	differentPayerSession := service.NewSession(differentPayer, nil, dispatcher)
+	differentPayerResult, err := differentPayerSession.HandleMessage(context.Background(), wireBytes)
+	if err != nil || !differentPayerResult.HasResponse || differentPayerResult.Suppressed {
+		t.Fatalf("different payer result = %#v, %v", differentPayerResult, err)
+	}
+	if dispatcher.calls != 3 {
+		t.Fatalf("dispatcher calls = %d, want 3", dispatcher.calls)
+	}
+	secondSession.Close()
+	differentContentSession.Close()
+	differentPayerSession.Close()
 }
 
 func TestSessionDoesNotSerializeDifferentIDs(t *testing.T) {
@@ -311,14 +331,16 @@ func TestSessionClassifiesInvalidBackendDataAsBackendFailure(t *testing.T) {
 	}
 }
 
-func TestHandleMessageKeepsBusinessResponseAndCauseSeparate(t *testing.T) {
+func TestSessionKeepsBusinessResponseAndCauseSeparate(t *testing.T) {
 	key := fixedKey()
 	backendCause := &backendTestError{message: "database unavailable"}
 	requestWire, err := client.NewSubscribe(requestID(28), "news")
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, handleErr := service.HandleMessage(context.Background(), key, requestWire, &failingBackend{err: backendCause}, service.NewRecordingDispatcher())
+	session := service.NewSession(key, &failingBackend{err: backendCause}, service.NewRecordingDispatcher())
+	defer session.Close()
+	result, handleErr := session.HandleMessage(context.Background(), requestWire)
 	if handleErr != nil || !result.HasResponse || result.Cause == nil {
 		t.Fatalf("one-shot business failure crossed transport boundary: result=%#v error=%v", result, handleErr)
 	}
@@ -522,6 +544,37 @@ type failingDispatcher struct {
 
 func (dispatcher *failingDispatcher) Dispatch(context.Context, service.PublishEvent) (protocol.Amount, error) {
 	return "", dispatcher.err
+}
+
+type persistentPublishKey struct {
+	payer     protocol.PublicKey
+	requestID protocol.RequestID
+	digest    [32]byte
+}
+
+type persistentDispatcher struct {
+	mu      sync.Mutex
+	calls   int
+	results map[persistentPublishKey]protocol.Amount
+}
+
+func (dispatcher *persistentDispatcher) Dispatch(_ context.Context, event service.PublishEvent) (protocol.Amount, error) {
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	if dispatcher.results == nil {
+		dispatcher.results = make(map[persistentPublishKey]protocol.Amount)
+	}
+	wire, err := client.NewPublish(event.RequestID, event.Channel, event.ContentJSON)
+	if err != nil {
+		return "", err
+	}
+	key := persistentPublishKey{payer: event.PayerID, requestID: event.RequestID, digest: sha256.Sum256(wire)}
+	if amount, ok := dispatcher.results[key]; ok {
+		return amount, nil
+	}
+	dispatcher.calls++
+	dispatcher.results[key] = "0.001"
+	return "0.001", nil
 }
 
 type pricedBackend struct{}

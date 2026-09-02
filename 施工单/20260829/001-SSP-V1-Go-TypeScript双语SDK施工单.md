@@ -5,6 +5,9 @@
 > 后续改版：请求关联、成功响应和实际扣费金额由
 > [002 施工单](./002-SSP-V1请求响应与精确计费改造施工单.md) 统一实施；如两张施工单冲突，
 > 以 002 为准。
+> 2026-09-02 后的广播边界以
+> [SSP + CP 协议族消融施工索引](../20260902/003-SSP-CP协议族消融-SSP侧施工索引.md)
+> 为准：Dispatcher 不再转发完整入站 SSP Wire，只原样保留 CP content_json。
 >
 > 需求真值：
 >
@@ -375,17 +378,19 @@ TypeScript 使用同义返回结构：
 - Subscribe：原子更新 Backend，成功时无 SSP 响应；
 - Unsubscribe：原子更新 Backend，成功时无 SSP 响应；
 - SubscriptionsRequest：读取 Backend 并返回 SubscriptionsResponse；
-- Publish：把原始 Publish Wire 和已认证发布者公钥交给 Dispatcher，成功时无 SSP 响应；
+- Publish：把已认证付款人、request_id、channel 和 exact content_json 交给 Dispatcher，
+  成功时返回 ActionResult；订阅交付另走 Sink，不返回订阅者 ActionResult；
 - 服务入口不接受 SubscriptionsResponse 作为客户端命令；
 - 外部长期连接应用负责按接收顺序调用同一连接的 HandleMessage。
 
 Dispatcher 的窄接口只接收：
 
 ```text
-authenticated publisher public key
+authenticated payer public key
+request_id
 channel
 content_json exact bytes
-完整 Publish Wire exact bytes
+完整 SSP Wire 不跨 Stream 透传
 ```
 
 规则：
@@ -398,7 +403,7 @@ content_json exact bytes
 
 ### 验收
 
-- Publish 传给 Dispatcher 的 Wire 与输入逐字节相同；
+- Publish 传给 Dispatcher 的 content_json 与输入逐字节相同；
 - Subscribe → SubscriptionsRequest 严格观察到新状态；
 - Unsubscribe → SubscriptionsRequest 严格观察到移除后的状态；
 - 非法客户端 SubscriptionsResponse 被拒绝；
@@ -415,14 +420,15 @@ content_json exact bytes
 从已认证长期连接收到一个完整 SSP Wire
   → 从连接取得 remote_public_key
   → 可选 SPI / 计费策略
-  → HandleMessage(remote_public_key, wire)
+  → 为该 Stream 创建 Session(remote_public_key, backend, dispatcher)
+  → session.HandleMessage(wire)
       ├── response 存在：外部应用写回原连接
       └── response 不存在：不写伪造的空报文
 
 Dispatcher 收到 Publish 事件
   → 外部应用读取订阅状态并使用 Matches
   → 在自己的在线连接注册表中选择接收者
-  → 外部应用发送原始 Publish Wire
+  → 外部应用为订阅者 Stream 生成新的 Publish delivery Wire，仅保持 channel 与 CP content_json 字节
 ```
 
 施工内容：
@@ -481,7 +487,8 @@ Dispatcher 收到 Publish 事件
 - Go 与 TypeScript 各提供报文构造、状态 Backend、Service 和 RecordingDispatcher 示例；
 - 示例只在进程内调用 SDK，不建立真实网络连接；
 - 所有英文 API、字段和错误分类旁边提供中文解释；
-- 明确 `*` 规范状态、无排除项、无历史、Publish 非幂等和 JSON exact bytes；
+- 明确 `*` 规范状态、无排除项、无历史和 JSON exact bytes；其中“Publish 非幂等”是历史结论，
+  已废止；当前生产收费幂等以 `payer_id`、`request_id` 和 `request_digest` 为准；
 - 正式文档中的 API 名称必须与实际导出完全一致。
 
 ### 发布检查

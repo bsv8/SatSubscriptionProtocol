@@ -1,6 +1,7 @@
 package wire_test
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -201,6 +202,42 @@ func TestDefensiveCopies(t *testing.T) {
 	}
 	if !errors.Is(protocol.ErrInvalidJSON, protocol.ErrInvalidJSON) {
 		t.Fatal("sentinel sanity check failed")
+	}
+}
+
+func TestPublishForwardingUsesNewRequestIDAndExactContentBytes(t *testing.T) {
+	inboundRequestID := mustRequestID(t, bytesOf(0x21))
+	deliveryRequestID := mustRequestID(t, bytesOf(0x22))
+	contentJSON := []byte("  {\"n\":1,\"text\":\"exact\"} \n")
+
+	inboundWire, err := client.NewPublish(inboundRequestID, "news", contentJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbound, err := client.ParsePublish(inboundWire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryWire, err := client.NewPublish(deliveryRequestID, inbound.Channel, inbound.ContentJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := client.ParsePublish(deliveryWire)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if delivery.RequestID == inbound.RequestID {
+		t.Fatal("delivery request_id must be newly generated")
+	}
+	if delivery.Channel != inbound.Channel {
+		t.Fatalf("delivery channel = %q, want %q", delivery.Channel, inbound.Channel)
+	}
+	if !bytes.Equal(delivery.ContentJSON, contentJSON) || !bytes.Equal(delivery.ContentJSON, inbound.ContentJSON) {
+		t.Fatal("delivery content_json bytes changed")
+	}
+	if bytes.Equal(deliveryWire, inboundWire) {
+		t.Fatal("different request IDs must produce different SSP Wire bytes")
 	}
 }
 

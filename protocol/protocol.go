@@ -18,15 +18,11 @@ type Version uint64
 type Kind uint64
 
 const (
-	// SDKVersion 是 Go 与 TypeScript SDK 对齐的发布版本，从 0.1.0 开始。
-	SDKVersion = "0.1.0"
+	// SDKVersion 是 Go 与 TypeScript SDK 对齐的发布版本。
+	SDKVersion = "0.2.0"
 
 	// WireVersion 是 SSP V1 的固定 Wire 版本常量。
 	WireVersion Version = 1
-	// CurrentWireVersion 是当前唯一支持的 Wire 版本。
-	CurrentWireVersion Version = WireVersion
-	// WireVersionV1 是 SSP V1 的 Wire 版本兼容别名。
-	WireVersionV1 Version = WireVersion
 
 	// PublishKind 表示发布请求或向订阅者交付一条 JSON 广播。
 	PublishKind Kind = 1
@@ -40,19 +36,6 @@ const (
 	SubscriptionsResponseKind Kind = 5
 	// ActionResultKind 表示返回动作成功/失败及实际扣费金额。
 	ActionResultKind Kind = 6
-
-	// KindPublish 是 PublishKind 的语义化兼容别名。
-	KindPublish Kind = PublishKind
-	// KindSubscribe 是 SubscribeKind 的语义化兼容别名。
-	KindSubscribe Kind = SubscribeKind
-	// KindUnsubscribe 是 UnsubscribeKind 的语义化兼容别名。
-	KindUnsubscribe Kind = UnsubscribeKind
-	// KindSubscriptionsRequest 是 SubscriptionsRequestKind 的语义化兼容别名。
-	KindSubscriptionsRequest Kind = SubscriptionsRequestKind
-	// KindSubscriptionsResponse 是 SubscriptionsResponseKind 的语义化兼容别名。
-	KindSubscriptionsResponse Kind = SubscriptionsResponseKind
-	// KindActionResult 是 ActionResultKind 的语义化兼容别名。
-	KindActionResult Kind = ActionResultKind
 
 	// RequestIDBytes 是 request_id 的固定字节长度。
 	RequestIDBytes = 32
@@ -137,8 +120,6 @@ var (
 	// ErrRejected 表示 Backend 或 Dispatcher 明确拒绝了业务动作。
 	// 它不会直接编码到 Wire；Service 会将其映射为 ActionResult.REJECTED。
 	ErrRejected = errors.New("REJECTED")
-	// ErrRequestRejected 是 ErrRejected 的语义化别名。
-	ErrRequestRejected = ErrRejected
 )
 
 const (
@@ -148,12 +129,6 @@ const (
 	ActionErrorRejected = "REJECTED"
 	// ActionErrorInternalError 是服务端内部处理失败的线上错误码。
 	ActionErrorInternalError = "INTERNAL_ERROR"
-	// InvalidRequestErrorCode 是 ActionErrorInvalidRequest 的兼容命名别名。
-	InvalidRequestErrorCode = ActionErrorInvalidRequest
-	// RejectedErrorCode 是 ActionErrorRejected 的兼容命名别名。
-	RejectedErrorCode = ActionErrorRejected
-	// InternalErrorCode 是 ActionErrorInternalError 的兼容命名别名。
-	InternalErrorCode = ActionErrorInternalError
 )
 
 // ErrorCodeOf 返回错误包含的稳定 SDK 错误分类。
@@ -213,11 +188,6 @@ func NewRequestIDFromBytes(raw []byte) (RequestID, error) {
 	return requestID, nil
 }
 
-// RequestIDFromBytes 是 NewRequestIDFromBytes 的语义化别名。
-func RequestIDFromBytes(raw []byte) (RequestID, error) {
-	return NewRequestIDFromBytes(raw)
-}
-
 // Valid 判断 RequestID 是否具有固定长度。数组类型总是满足该长度要求。
 func (requestID RequestID) Valid() bool {
 	return len(requestID) == RequestIDBytes
@@ -228,11 +198,6 @@ func (requestID RequestID) Bytes() []byte {
 	result := make([]byte, RequestIDBytes)
 	copy(result, requestID[:])
 	return result
-}
-
-// CloneRequestID 返回 request_id 的值副本，便于表达防御性复制语义。
-func CloneRequestID(requestID RequestID) RequestID {
-	return requestID
 }
 
 // Amount 是规范化的精确十进制金额字符串。

@@ -11,7 +11,6 @@ import {
   Session,
   encodeSubscriptionsResponseDocument,
   encodeWire,
-  handleMessage,
   newPublish,
   newActionResult,
   newSubscriptionsResponse,
@@ -148,26 +147,30 @@ async function invalidExchange() {
 
 async function serviceExchange() {
   const fixture = await readFixture("dispatch-v1.json");
-  const key = fromHex(fixture.publish_event.publisher_public_key_hex);
+  const key = fromHex(fixture.publish_event.payer_id_hex);
   const backend = new MemoryBackend();
   const dispatcher = new RecordingDispatcher();
-  const result = await handleMessage(key, fromHex(fixture.publish_event.wire_hex), backend, dispatcher);
-  return {
-    response_hex: toHex(result.response),
-    has_response: Boolean(result.response),
-    events: dispatcher.events().map((event) => ({
-      request_id_hex: toHex(event.requestId),
-      publisher_public_key_hex: toHex(event.publisherPublicKey),
-      channel: event.channel,
-      content_json_hex: toHex(event.contentJson),
-      wire_hex: toHex(event.wire),
-    })),
-  };
+  const session = new Session(key, backend, dispatcher);
+  try {
+    const result = await session.handleMessage(fromHex(fixture.publish_event.wire_hex));
+    return {
+      response_hex: toHex(result.response),
+      has_response: Boolean(result.response),
+      events: dispatcher.events().map((event) => ({
+        request_id_hex: toHex(event.requestId),
+        payer_id_hex: toHex(event.payerId),
+        channel: event.channel,
+        content_json_hex: toHex(event.contentJson),
+      })),
+    };
+  } finally {
+    session.close();
+  }
 }
 
 async function billingExchange() {
   const fixture = await readFixture("billing-v1.json");
-  const key = fromHex(fixture.publisher_public_key_hex);
+  const key = fromHex(fixture.payer_id_hex);
   const memory = new MemoryBackend();
   const backend = {
     subscribe(remotePublicKey, requestId, channel) {

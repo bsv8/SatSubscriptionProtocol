@@ -12,28 +12,31 @@ import (
 	"github.com/bsv8/SatSubscriptionProtocol/wire"
 )
 
-// Backend 是按已认证 remote_public_key 持久化订阅并执行实际扣费的接口。
-// 每次方法调用都必须由外部实现保证检查、扣费和状态读取/写入的原子事务边界。
-type Backend = subscription.Backend
+// Session 使用 subscription.Backend 按已认证 remote_public_key 持久化订阅并执行实际
+// 扣费。每次方法调用都必须由外部实现保证检查、扣费和状态读取/写入的原子事务边界。
+// Session 只在当前 Stream 内抑制 request_id；跨 Stream 的收费幂等由具体
+// Dispatcher/Backend 持久化实现，键为 (已认证 payer_id, request_id, deterministic
+// SSP Wire 的 SHA-256 request_digest)，并在完全相同重试时返回已保存的原始结果。
 
-// PublishEvent 是交给外部 Dispatcher 的完整 Publish 事件。
+// PublishEvent 是交给外部 Dispatcher 的精简 Publish 事件。
 type PublishEvent struct {
-	// RequestID 是发布请求编号；订阅者不应把它当作广播消息 ID。
+	// RequestID 是发布请求编号，也是具体计费实现跨 Stream 幂等的第二部分；
+	// 订阅者不应把它当作广播消息 ID。
 	RequestID protocol.RequestID
-	// PublisherPublicKey 是外层认证得到的发布者公钥，不来自 SSP payload。
-	PublisherPublicKey protocol.PublicKey
+	// PayerID 是外层已认证连接提供的付款人身份，不来自 SSP payload。
+	PayerID protocol.PublicKey
 	// Channel 是 Publish 的普通 channel。
 	Channel string
 	// ContentJSON 是 Publish 的 JSON exact bytes 防御性副本。
 	ContentJSON []byte
-	// Wire 是收到的完整 Publish Wire exact bytes 防御性副本。
-	Wire []byte
 }
 
 // Dispatcher 是窄广播回调接口，不包含任何网络或连接类型。
 // 成功返回值必须是服务端已经实际扣除的金额。
 type Dispatcher interface {
-	// Dispatch 接收一个已认证发布者和完整 Publish 事件，并返回实际扣费金额。
+	// Dispatch 接收一个已认证付款人和精简 Publish 事件，并返回实际扣费金额。
+	// 生产实现必须按 (event.PayerID, event.RequestID, deterministic Wire 摘要)
+	// 持久化 Publish 收费幂等，不能把 Session 或 Stream 生命周期当作持久化幂等边界。
 	Dispatch(ctx context.Context, event PublishEvent) (chargedAmount protocol.Amount, err error)
 }
 
@@ -51,14 +54,11 @@ type Result struct {
 	Cause error
 }
 
-// SessionResult 是 Result 的语义化别名。
-type SessionResult = Result
-
 // Session 表示一个 Stream 的 request_id 登记范围。
 // Session 只保护编号登记，不串行化不同 request_id 的 Backend/Dispatcher 调用。
 type Session struct {
 	remotePublicKey protocol.PublicKey
-	backend         Backend
+	backend         subscription.Backend
 	dispatcher      Dispatcher
 
 	mu     sync.Mutex
@@ -68,7 +68,7 @@ type Session struct {
 
 // NewSession 创建一个与单条 Stream 绑定的无网络 Session。
 // remotePublicKey 必须来自外层已认证连接；公钥形状错误会在 HandleMessage 时返回本地错误。
-func NewSession(remotePublicKey protocol.PublicKey, backend Backend, dispatcher Dispatcher) *Session {
+func NewSession(remotePublicKey protocol.PublicKey, backend subscription.Backend, dispatcher Dispatcher) *Session {
 	return &Session{
 		remotePublicKey: remotePublicKey,
 		backend:         backend,
@@ -143,7 +143,7 @@ func (session *Session) HandleMessage(ctx context.Context, wireCBOR []byte) (Res
 	case protocol.SubscriptionsRequestKind:
 		return session.handleSubscriptions(ctx, request.SubscriptionsRequest)
 	case protocol.PublishKind:
-		return session.handlePublish(ctx, request.Publish, wireCBOR)
+		return session.handlePublish(ctx, request.Publish)
 	default:
 		return Result{}, fmt.Errorf("%w: unsupported client request kind", protocol.ErrUnsupportedKind)
 	}
@@ -218,17 +218,16 @@ func (session *Session) handleSubscriptions(ctx context.Context, request protoco
 	return Result{Response: protocol.CloneBytes(encoded), HasResponse: true}, nil
 }
 
-func (session *Session) handlePublish(ctx context.Context, publish protocol.Publish, wireCBOR []byte) (Result, error) {
+func (session *Session) handlePublish(ctx context.Context, publish protocol.Publish) (Result, error) {
 	if session.dispatcher == nil {
 		return session.actionFailureWithCause(publish.RequestID, protocol.ActionErrorInternalError,
 			wrapDispatchFailure("Publish", errors.New("publish dispatcher is required")))
 	}
 	event := PublishEvent{
-		RequestID:          publish.RequestID,
-		PublisherPublicKey: session.remotePublicKey,
-		Channel:            publish.Channel,
-		ContentJSON:        protocol.CloneBytes(publish.ContentJSON),
-		Wire:               protocol.CloneBytes(wireCBOR),
+		RequestID:   publish.RequestID,
+		PayerID:     session.remotePublicKey,
+		Channel:     publish.Channel,
+		ContentJSON: protocol.CloneBytes(publish.ContentJSON),
 	}
 	amount, err := session.dispatcher.Dispatch(ctx, event)
 	if err != nil {
@@ -305,23 +304,6 @@ func wrapDispatchFailure(operation string, cause error) error {
 	return fmt.Errorf("%w: %s: %w", protocol.ErrDispatchFailure, operation, cause)
 }
 
-// HandleMessage 是单次调用便捷入口，返回与 Session 相同的 Result。
-// 长期 Stream 必须为每条连接复用 Session，以启用 request_id 重复抑制和上限保护。
-// 业务失败返回 Result.Response 和 Result.Cause，但 error 为 nil；只有无法安全构造响应的
-// 格式、身份、Session 或内部编码错误才返回非空 error。调用方应先按 HasResponse 写出
-// 响应，再记录 Result.Cause。
-func HandleMessage(
-	ctx context.Context,
-	remotePublicKey protocol.PublicKey,
-	wireCBOR []byte,
-	backend Backend,
-	dispatcher Dispatcher,
-) (Result, error) {
-	session := NewSession(remotePublicKey, backend, dispatcher)
-	defer session.Close()
-	return session.HandleMessage(ctx, wireCBOR)
-}
-
 // RecordingDispatcher 是只记录事件并返回免费金额的线程安全 Dispatcher，仅用于测试和示例。
 type RecordingDispatcher struct {
 	mu     sync.Mutex
@@ -338,7 +320,6 @@ func (dispatcher *RecordingDispatcher) Dispatch(_ context.Context, event Publish
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()
 	event.ContentJSON = protocol.CloneBytes(event.ContentJSON)
-	event.Wire = protocol.CloneBytes(event.Wire)
 	dispatcher.events = append(dispatcher.events, event)
 	return protocol.ZeroAmount, nil
 }
@@ -351,7 +332,6 @@ func (dispatcher *RecordingDispatcher) Events() []PublishEvent {
 	for index, event := range dispatcher.events {
 		result[index] = event
 		result[index].ContentJSON = protocol.CloneBytes(event.ContentJSON)
-		result[index].Wire = protocol.CloneBytes(event.Wire)
 	}
 	return result
 }

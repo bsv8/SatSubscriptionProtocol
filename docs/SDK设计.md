@@ -1,8 +1,11 @@
 # SSP SDK 设计
 
+> libp2p + SSP 身份域与独立 CP 内容域的跨仓库消融目标见
+> [SSP + CP 协议族消融](./SSP-CP协议族消融.md)。本文其余部分仍是当前实现说明。
+
 ## 1. 边界和目标
 
-Go 与 TypeScript SDK 版本均为 0.1.0。SDK 是 SSP V1 的规范实现，负责：
+Go 与 TypeScript SDK 项目包版本均为 0.2.0；SSP 协议版本仍为 V1。SDK 负责：
 
 - deterministic CBOR 编解码和严格字段校验；
 - content_json 完整 JSON 与 exact bytes 保留；
@@ -104,12 +107,23 @@ type Dispatcher interface {
 }
 ~~~
 
-TypeScript 的 SubscriptionBackend 与 Dispatcher 使用 RequestId 和 Amount，方法名
+TypeScript 的 Backend 与 Dispatcher 使用 RequestId 和 Amount，方法名
 分别为 subscribe、unsubscribe、subscriptions、dispatch。成功金额必须是实际扣除
 金额，不是报价。
 
 Backend 必须在同一事务边界内完成检查、收费和状态变更；查询的列表和收费也必须来自同一
 事务快照。SDK 不实现数据库事务，只验证并规范化 Backend 返回的列表。
+
+Session 的 `seen` 集合只提供当前 Stream 的快速抑制，不是持久化账本。生产 Backend/Dispatcher
+必须用已认证的 `payer_id` 与 `request_id` 索引收费操作，并保存 deterministic SSP Wire 的
+SHA-256 `request_digest`；三者全部相同才返回首次保存的原始收费结果。同一付款人和
+request_id 的不同 channel、content 或 Kind 必须映射为 `REJECTED`，不同付款人的相同
+request_id 独立收费。该契约复用现有接口参数，不增加 IdempotencyManager 或其他中间层。
+
+`PublishEvent` 只保留请求 request_id、已认证调用者/付款公钥、channel 和 exact
+content_json，不保留完整入站 Wire。生产 Dispatcher 为每个订阅者 Stream 生成新的 delivery
+request_id，保持 channel 和 content_json 字节；订阅交付路径不生成 ActionResult。该边界已在
+SatSubscription 的实际 Server/Dispatcher 组合和集成测试中落地。
 
 ## 6. 对外服务接口
 
@@ -133,8 +147,8 @@ const session = new Session(remotePublicKey, backend, dispatcher);
 const result = await session.handleMessage(completeWire);
 ~~~
 
-返回 { response?: Uint8Array, suppressed: boolean, cause?: SSPError }。便捷的
-handleMessage 适合一次性处理；长期 Stream 必须复用 Session。
+返回 { response?: Uint8Array, suppressed: boolean, cause?: SSPError }。TypeScript SDK 只保留
+Session 入口；长期 Stream 必须复用同一 Session，订阅交付也不得把出站 Publish 再送入该入口。
 
 ## 7. 严格编码和限制
 

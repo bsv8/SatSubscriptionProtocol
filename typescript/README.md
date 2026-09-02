@@ -64,11 +64,15 @@ parseSubscriptionsResponse(wireCbor): SubscriptionsResponse
 
 newRequestId() 使用 Web Crypto/Node 安全随机源。Amount 是规范十进制字符串，最多
 64 字节、18 位小数，不转换成 JavaScript number。服务业务失败仍返回失败 ActionResult；
-SessionResult.cause 是本地 SSPError，原始异常位于标准 Error.cause，不会进入 Wire。
+TypeScript SessionResult.cause 是本地 SSPError，原始异常位于标准 Error.cause，不会进入 Wire。
 
 Go 的对应 Result 在业务失败时仍保留 Response 和 Cause，但返回 error 为 nil；连接层应
 先写响应，再记录 Cause。SPI 整数余额与 SSP 小数金额的应用层换算见仓库
 [SPI 集成与金额换算](../docs/SPI集成与金额换算.md)。
+
+Session 的重复抑制只覆盖当前 Stream。生产 Backend/Dispatcher 必须按已认证的
+`(payer_id, request_id)` 持久化收费幂等；相同付款人重试返回原收费结果，不同付款人即使
+使用相同 request_id 也分别处理。
 
 根入口以及 sat-subscription-protocol/protocol、sat-subscription-protocol/wire、sat-subscription-protocol/client、
 sat-subscription-protocol/subscription、sat-subscription-protocol/service 子入口均可用。字段、错误分类和 Go 对照

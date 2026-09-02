@@ -7,6 +7,10 @@ HTTP、WebSocket、WebRTC 或 libp2p 连接。
 外部应用负责连接、身份认证、分帧、写回响应、在线连接注册和实际广播发送。SDK 从外层
 取得 remote_public_key（已认证的 33 字节压缩公钥形状）和一个完整 SSP Wire。
 
+libp2p + SSP 身份域与独立 CP 内容域的整体消融设计见
+[`docs/SSP-CP协议族消融.md`](docs/SSP-CP协议族消融.md)。该文档记录已实施边界和验收状态；
+下文说明当前实现。
+
 ## Wire 与响应
 
 完整 Wire 固定为：[wire_version, wire_kind, document_cbor]。document_cbor 是内层
@@ -32,10 +36,17 @@ SubscriptionsResponse  = [request_id, charged_amount, channels]
 ActionResult            = [request_id, success, charged_amount, error_code]
 ~~~
 
-request_id 只在同一条 Stream 内关联请求和响应，不是广播消息 ID，也不提供断线恢复、
-结果查询或跨 Stream 去重。Publish、Subscribe、Unsubscribe 成功返回 ActionResult；
+request_id 只在同一条 Stream 内关联请求和响应，不是广播消息 ID。Session 只在当前 Stream
+内抑制重复编号，不保存跨 Stream 的结果；生产 Backend/Dispatcher 必须为可收费动作按
+`(已认证 payer_id, request_id)` 索引并保存 deterministic SSP Wire 的 SHA-256
+`request_digest`。只有摘要也相同才是重试；同一付款人和 request_id 但 channel、content 或
+Kind 不同必须返回 `REJECTED`，不能复用收费结果。不同付款人使用独立的收费键。Publish、Subscribe、Unsubscribe 成功返回 ActionResult；
 SubscriptionsRequest 成功返回唯一的 SubscriptionsResponse。每个成功响应都携带本次
 实际 charged_amount。
+
+目标广播边界中，上一句的 Publish 响应只适用于客户端 → Supplier 请求。Supplier 向订阅者
+交付时生成新的 delivery request_id，保持 channel，并逐字节复用 CP content_json；订阅者将
+其作为事件处理，不返回 ActionResult。完整第一跳 SSP Wire 不会直接转发。
 
 失败请求如果能安全读出 request_id，返回失败 ActionResult，且不关闭 Stream：
 
@@ -125,7 +136,7 @@ session.close();
 ~~~
 
 所有公开构造函数都会校验并复制 requestId、JSON 字节和 Wire 字节。TypeScript
-SSPError.code 提供稳定本地分类，业务失败的 SessionResult.cause 使用标准
+SSPError.code 提供稳定本地分类，业务失败的 TypeScript SessionResult.cause 使用标准
 Error.cause 保留原始异常；这些本地信息不会进入 ActionResult。
 
 ## 目录与验收

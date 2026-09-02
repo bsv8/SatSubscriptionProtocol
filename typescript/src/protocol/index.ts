@@ -2,12 +2,8 @@
 
 /** SSP V1 的固定 Wire 版本。 */
 export const WIRE_VERSION = 1 as const;
-/** SSP V1 的固定 Wire 版本中文别名导出。 */
-export const WireVersion = WIRE_VERSION;
-/** 与 Go SDK 对齐的发布版本，从 0.1.0 开始。 */
-export const SDK_VERSION = "0.1.0" as const;
-/** SDK_VERSION 的跨语言命名别名。 */
-export const SDKVersion = SDK_VERSION;
+/** 与 Go SDK 对齐的发布版本。 */
+export const SDK_VERSION = "0.2.0" as const;
 
 /** SSP V1 的六种固定消息类型。 */
 export const Kind = {
@@ -28,23 +24,8 @@ export const Kind = {
 /** SSP Wire Kind 数值类型。 */
 export type WireKind = (typeof Kind)[keyof typeof Kind];
 
-/** 固定 Kind 的大写常量别名。 */
-export const KIND_PUBLISH = Kind.Publish;
-/** Subscribe Kind 的大写常量别名。 */
-export const KIND_SUBSCRIBE = Kind.Subscribe;
-/** Unsubscribe Kind 的大写常量别名。 */
-export const KIND_UNSUBSCRIBE = Kind.Unsubscribe;
-/** SubscriptionsRequest Kind 的大写常量别名。 */
-export const KIND_SUBSCRIPTIONS_REQUEST = Kind.SubscriptionsRequest;
-/** SubscriptionsResponse Kind 的大写常量别名。 */
-export const KIND_SUBSCRIPTIONS_RESPONSE = Kind.SubscriptionsResponse;
-/** ActionResult Kind 的大写常量别名。 */
-export const KIND_ACTION_RESULT = Kind.ActionResult;
-
 /** request_id 的固定字节长度。 */
 export const REQUEST_ID_BYTES = 32;
-/** request_id 的跨语言命名别名。 */
-export const RequestIDBytes = REQUEST_ID_BYTES;
 /** 完整 Wire 最大字节数（1 MiB）。 */
 export const MAX_WIRE_BYTES = 1_048_576;
 /** 外层 document_cbor 最大字节数。 */
@@ -61,23 +42,6 @@ export const MAX_AMOUNT_BYTES = 64;
 export const MAX_AMOUNT_SCALE = 18;
 /** 单个 Stream Session 可登记的最大 request_id 数量。 */
 export const MAX_REQUEST_IDS_PER_SESSION = 65_536;
-
-/** MaxWireBytes 的跨语言命名别名。 */
-export const MaxWireBytes = MAX_WIRE_BYTES;
-/** MaxDocumentBytes 的跨语言命名别名。 */
-export const MaxDocumentBytes = MAX_DOCUMENT_BYTES;
-/** MaxChannelUTF8Bytes 的跨语言命名别名。 */
-export const MaxChannelUTF8Bytes = MAX_CHANNEL_UTF8_BYTES;
-/** MaxContentJSONBytes 的跨语言命名别名。 */
-export const MaxContentJSONBytes = MAX_CONTENT_JSON_BYTES;
-/** MaxSubscriptions 的跨语言命名别名。 */
-export const MaxSubscriptions = MAX_SUBSCRIPTIONS;
-/** MaxAmountBytes 的跨语言命名别名。 */
-export const MaxAmountBytes = MAX_AMOUNT_BYTES;
-/** MaxAmountScale 的跨语言命名别名。 */
-export const MaxAmountScale = MAX_AMOUNT_SCALE;
-/** MaxRequestIDsPerSession 的跨语言命名别名。 */
-export const MaxRequestIDsPerSession = MAX_REQUEST_IDS_PER_SESSION;
 
 /** 跨语言稳定的 SDK 本地错误码。 */
 export const ErrorCode = {
@@ -155,8 +119,6 @@ export function errorCode(error: unknown): ErrorCode | undefined {
 
 /** request_id 的运行时类型；所有公开 API 都会复制它。 */
 export type RequestId = Uint8Array;
-/** RequestId 的大写命名兼容别名。 */
-export type RequestID = RequestId;
 
 /** 使用 Web Crypto 安全随机源生成 request_id。 */
 export function newRequestId(): RequestId {
@@ -234,8 +196,6 @@ export type Amount = string;
 
 /** 免费或失败结果的规范金额编码。 */
 export const ZERO_AMOUNT: Amount = "0";
-/** ZeroAmount 的跨语言命名别名。 */
-export const ZeroAmount = ZERO_AMOUNT;
 
 /** 校验 charged_amount 的精确十进制规范。 */
 export function validateAmount(value: Amount): void {

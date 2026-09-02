@@ -23,7 +23,6 @@ import {
   encodePublishDocument,
   encodeSubscriptionsResponseDocument,
   encodeWire,
-  handleMessage,
   matches,
   newActionResult,
   newAmount,
@@ -201,6 +200,23 @@ test("client owns JSON and request ID inputs and parsers own returned bytes", ()
   assert.equal(toHex(parsePublish(wire).requestId), originalId);
 });
 
+test("Publish forwarding uses a new request ID and exact content bytes", () => {
+  const inboundRequestId = id(40);
+  const deliveryRequestId = id(41);
+  const contentJson = new TextEncoder().encode('  {"n":1,"text":"exact"} \n');
+
+  const inboundWire = newPublish(inboundRequestId, "news", contentJson);
+  const inbound = parsePublish(inboundWire);
+  const deliveryWire = newPublish(deliveryRequestId, inbound.channel, inbound.contentJson);
+  const delivery = parsePublish(deliveryWire);
+
+  assert.notDeepEqual(Array.from(delivery.requestId), Array.from(inbound.requestId));
+  assert.equal(delivery.channel, inbound.channel);
+  assert.equal(toHex(delivery.contentJson), toHex(contentJson));
+  assert.equal(toHex(delivery.contentJson), toHex(inbound.contentJson));
+  assert.notEqual(toHex(deliveryWire), toHex(inboundWire));
+});
+
 test("service returns ActionResult for every successful request and preserves Publish event", async () => {
   const key = publicKey(4);
   const backend = new MemoryBackend();
@@ -226,9 +242,8 @@ test("service returns ActionResult for every successful request and preserves Pu
   assert.equal(parseActionResult(publishResult.response).success, true);
   const events = dispatcher.events();
   assert.equal(toHex(events[0].requestId), toHex(publishId));
-  assert.equal(toHex(events[0].publisherPublicKey), toHex(key));
+  assert.equal(toHex(events[0].payerId), toHex(key));
   assert.equal(toHex(events[0].contentJson), toHex(content));
-  assert.equal(toHex(events[0].wire), toHex(publishWire));
 
   const unsubscribeId = id(8);
   const unsubscribeResult = await session.handleMessage(newUnsubscribe(unsubscribeId, "news"));
@@ -261,10 +276,19 @@ test("Session suppresses concurrent duplicate IDs and permits distinct IDs", asy
   assert.ok(second.response);
 });
 
-test("the same request ID executes again after switching Sessions", async () => {
+test("Session suppresses locally while persistent Backend deduplicates across Sessions", async () => {
   let calls = 0;
+  const completed = new Map();
   const backend = {
-    subscribe() { calls += 1; return "0"; },
+    subscribe(key, requestId) {
+      const keyString = `${toHex(key)}:${toHex(requestId)}`;
+      const previous = completed.get(keyString);
+      if (previous !== undefined) return previous;
+      calls += 1;
+      const amount = "0.001";
+      completed.set(keyString, amount);
+      return amount;
+    },
     unsubscribe() { return "0"; },
     subscriptions() { return { channels: [], chargedAmount: "0" }; },
   };
@@ -275,8 +299,11 @@ test("the same request ID executes again after switching Sessions", async () => 
   firstSession.close();
   const secondSession = new Session(publicKey(30), backend, new RecordingDispatcher());
   assert.ok((await secondSession.handleMessage(requestWire)).response);
+  const differentPayerSession = new Session(publicKey(31), backend, new RecordingDispatcher());
+  assert.ok((await differentPayerSession.handleMessage(requestWire)).response);
   assert.equal(calls, 2);
   secondSession.close();
+  differentPayerSession.close();
 });
 
 test("the same subscription action with different IDs is charged twice", async () => {
@@ -370,11 +397,11 @@ test("invalid Backend subscriptions keep INVALID_SUBSCRIPTIONS as the cause", as
 test("service returns Backend and Dispatcher amounts without floating point conversion", async () => {
   const key = publicKey(19);
   const backend = {
-    subscribe() { return { chargedAmount: "0.001" }; },
-    unsubscribe() { return { chargedAmount: "12.34" }; },
+    subscribe() { return "0.001"; },
+    unsubscribe() { return "12.34"; },
     subscriptions() { return { channels: ["news"], chargedAmount: "0.123456789012345678" }; },
   };
-  const dispatcher = { dispatch() { return { chargedAmount: "1.2" }; } };
+  const dispatcher = { dispatch() { return "1.2"; } };
   const session = new Session(key, backend, dispatcher);
 
   const subscribe = await session.handleMessage(newSubscribe(id(20), "news"));
@@ -395,13 +422,6 @@ test("response/action encoders reject illegal field combinations", () => {
   assert.equal(parseActionResult(newActionResult({ requestId, success: false, chargedAmount: "0", errorCode: ActionErrorCode.INTERNAL_ERROR })).errorCode, ActionErrorCode.INTERNAL_ERROR);
   assert.equal(parseSubscriptionsResponse(newSubscriptionsResponse({ requestId, chargedAmount: "0.001", channels: [] })).chargedAmount, "0.001");
   assert.equal(decodeActionResultDocument(encodeActionResultDocument({ requestId, success: true, chargedAmount: "0", errorCode: "" })).success, true);
-});
-
-test("single-call handleMessage returns responses for action requests", async () => {
-  const key = publicKey(16);
-  const result = await handleMessage(key, newSubscribe(id(17), "news"), new MemoryBackend(), new RecordingDispatcher());
-  assert.ok(result.response);
-  assert.equal(parseActionResult(result.response).success, true);
 });
 
 test("newRequestId uses the fixed secure-random shape", () => {

@@ -11,9 +11,6 @@ import {
   validatePublicKey,
 } from "../protocol/index.js";
 
-/** Subscribe/Unsubscribe 成功时 Backend 返回的实际扣费结果。 */
-export type SubscriptionMutationResult = Amount | { readonly chargedAmount: Amount };
-
 /** Subscriptions 成功时 Backend 返回的列表和实际扣费结果。 */
 export interface SubscriptionQueryResult {
   /** 同一事务边界读取的订阅列表。 */
@@ -23,28 +20,25 @@ export interface SubscriptionQueryResult {
 }
 
 /** 按已认证 PublicKey 保存订阅状态并执行实际扣费的接口。 */
-export interface SubscriptionBackend {
+export interface Backend {
   /** 在同一事务中检查、扣费并添加 channel。 */
   subscribe(
     remotePublicKey: PublicKey,
     requestId: RequestId,
     channel: string,
-  ): SubscriptionMutationResult | Promise<SubscriptionMutationResult>;
+  ): Amount | Promise<Amount>;
   /** 在同一事务中检查、扣费并取消 channel。 */
   unsubscribe(
     remotePublicKey: PublicKey,
     requestId: RequestId,
     channel: string,
-  ): SubscriptionMutationResult | Promise<SubscriptionMutationResult>;
+  ): Amount | Promise<Amount>;
   /** 在同一事务中查询列表并扣费。 */
   subscriptions(
     remotePublicKey: PublicKey,
     requestId: RequestId,
   ): SubscriptionQueryResult | Promise<SubscriptionQueryResult>;
 }
-
-/** Backend 的语义化别名。 */
-export type Backend = SubscriptionBackend;
 
 /** 校验并复制订阅集合，返回唯一的 UTF-8 字节升序表示。 */
 export function normalizeSubscriptions(channels: readonly string[]): string[] {
@@ -108,7 +102,7 @@ export function matches(channels: readonly string[], publishChannel: string): bo
 }
 
 /** 线程/事件循环安全的进程内 Backend，仅用于测试和示例。重启后状态丢失。 */
-export class MemoryBackend implements SubscriptionBackend {
+export class MemoryBackend implements Backend {
   private readonly states = new Map<string, string[]>();
 
   /** 原子、幂等地更新内存订阅集合；内存示例固定免费。 */

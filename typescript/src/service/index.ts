@@ -22,39 +22,25 @@ import {
 import {
   Backend,
   normalizeSubscriptions,
-  SubscriptionMutationResult,
   SubscriptionQueryResult,
 } from "../subscription/index.js";
 
-/** 交给外部 Dispatcher 的完整 Publish 事件。 */
+/** 交给外部 Dispatcher 的精简 Publish 事件。 */
 export interface PublishEvent {
   /** 发布请求编号；订阅者不应把它当作广播消息 ID。 */
   readonly requestId: RequestId;
-  /** 外层认证得到的发布者公钥，不来自 SSP payload。 */
-  readonly publisherPublicKey: Uint8Array;
+  /** 外层已认证连接提供的付款人身份，不来自 SSP payload。 */
+  readonly payerId: Uint8Array;
   /** Publish 的普通 channel。 */
   readonly channel: string;
   /** Publish 的 JSON exact bytes 防御性副本。 */
   readonly contentJson: Uint8Array;
-  /** 收到的完整 Publish Wire exact bytes 防御性副本。 */
-  readonly wire: Uint8Array;
 }
-
-/** Dispatcher 的结果形状；成功值必须是已实际扣除的金额。 */
-export type DispatchResult = Amount | { readonly chargedAmount: Amount };
 
 /** 无网络 Dispatcher 接口。 */
 export interface Dispatcher {
-  /** 接收已认证发布者和完整 Publish 事件，返回实际扣费金额。 */
-  dispatch(event: PublishEvent): DispatchResult | Promise<DispatchResult>;
-}
-
-/** 单次便捷入口的返回值；仅成功响应时包含 response。 */
-export interface HandleMessageResult {
-  /** 需要写回发起请求的同一连接的 Response Wire。 */
-  readonly response?: Uint8Array;
-  /** 本地诊断用的稳定错误；不进入 response Wire。 */
-  readonly cause?: SSPError;
+  /** 接收已认证付款人和精简 Publish 事件，返回实际扣费金额。 */
+  dispatch(event: PublishEvent): Amount | Promise<Amount>;
 }
 
 /** Session 的返回值；suppressed 始终表示本次是否因重复编号而静默丢弃。 */
@@ -86,11 +72,6 @@ export class Session {
   close(): void {
     this.closed = true;
     this.seen.clear();
-  }
-
-  /** 大写命名兼容别名。 */
-  Close(): void {
-    this.close();
   }
 
   /**
@@ -125,7 +106,7 @@ export class Session {
       case Kind.SubscriptionsRequest:
         return this.handleSubscriptions(request.subscriptionsRequest!, envelope.requestId);
       case Kind.Publish:
-        return this.handlePublish(request.publish!, envelope.requestId, wireCbor);
+        return this.handlePublish(request.publish!, envelope.requestId);
       default:
         throw new SSPError(ErrorCode.UNSUPPORTED_KIND, "不是客户端请求 Kind");
     }
@@ -138,7 +119,7 @@ export class Session {
     }
     try {
       const returned = await this.backend.subscribe(this.remotePublicKey, request.requestId, request.channel);
-      const amount = mutationAmount(returned);
+      const amount = returned;
       validateAmount(amount);
       return { response: actionResult(requestId, true, amount, ""), suppressed: false };
     } catch (error) {
@@ -154,7 +135,7 @@ export class Session {
     }
     try {
       const returned = await this.backend.unsubscribe(this.remotePublicKey, request.requestId, request.channel);
-      const amount = mutationAmount(returned);
+      const amount = returned;
       validateAmount(amount);
       return { response: actionResult(requestId, true, amount, ""), suppressed: false };
     } catch (error) {
@@ -185,21 +166,20 @@ export class Session {
     }
   }
 
-  private async handlePublish(request: { requestId: RequestId; channel: string; contentJson: Uint8Array }, requestId: RequestId, wireCbor: Uint8Array): Promise<SessionResult> {
+  private async handlePublish(request: { requestId: RequestId; channel: string; contentJson: Uint8Array }, requestId: RequestId): Promise<SessionResult> {
     if (!this.dispatcher || typeof this.dispatcher.dispatch !== "function") {
       return this.failureWithCause(requestId, ActionErrorCode.INTERNAL_ERROR,
         new SSPError(ErrorCode.DISPATCH_FAILURE, "Dispatcher 未配置"), ErrorCode.DISPATCH_FAILURE);
     }
     const event: PublishEvent = {
       requestId: cloneBytes(request.requestId),
-      publisherPublicKey: cloneBytes(this.remotePublicKey),
+      payerId: cloneBytes(this.remotePublicKey),
       channel: request.channel,
       contentJson: cloneBytes(request.contentJson),
-      wire: cloneBytes(wireCbor),
     };
     try {
       const returned = await this.dispatcher.dispatch(event);
-      const amount = dispatchAmount(returned);
+      const amount = returned;
       validateAmount(amount);
       return { response: actionResult(requestId, true, amount, ""), suppressed: false };
     } catch (error) {
@@ -229,31 +209,6 @@ export class Session {
   }
 }
 
-/** 创建 Session 的函数式入口。 */
-export function newSession(remotePublicKey: PublicKey, backend?: Backend, dispatcher?: Dispatcher): Session {
-  return new Session(remotePublicKey, backend, dispatcher);
-}
-
-/**
- * 单次便捷入口。长期 Stream 应复用 Session，以启用重复 request_id 抑制和数量上限。
- */
-export async function handleMessage(
-  remotePublicKey: PublicKey,
-  wireCbor: Uint8Array,
-  backend: Backend,
-  dispatcher: Dispatcher,
-): Promise<HandleMessageResult> {
-  const session = new Session(remotePublicKey, backend, dispatcher);
-  try {
-    const result = await session.handleMessage(wireCbor);
-    return result.response
-      ? { response: cloneBytes(result.response), ...(result.cause ? { cause: result.cause } : {}) }
-      : {};
-  } finally {
-    session.close();
-  }
-}
-
 /** 只记录事件并返回免费金额的线程/事件循环安全 Dispatcher，仅用于测试和示例。 */
 export class RecordingDispatcher implements Dispatcher {
   private readonly recorded: PublishEvent[] = [];
@@ -262,10 +217,9 @@ export class RecordingDispatcher implements Dispatcher {
   dispatch(event: PublishEvent): Amount {
     this.recorded.push({
       requestId: cloneBytes(event.requestId),
-      publisherPublicKey: cloneBytes(event.publisherPublicKey),
+      payerId: cloneBytes(event.payerId),
       channel: event.channel,
       contentJson: cloneBytes(event.contentJson),
-      wire: cloneBytes(event.wire),
     });
     return "0";
   }
@@ -274,10 +228,9 @@ export class RecordingDispatcher implements Dispatcher {
   events(): readonly PublishEvent[] {
     return this.recorded.map((event) => ({
       requestId: cloneBytes(event.requestId),
-      publisherPublicKey: cloneBytes(event.publisherPublicKey),
+      payerId: cloneBytes(event.payerId),
       channel: event.channel,
       contentJson: cloneBytes(event.contentJson),
-      wire: cloneBytes(event.wire),
     }));
   }
 
@@ -297,32 +250,12 @@ function actionResult(requestId: RequestId, success: boolean, chargedAmount: Amo
   return encodeWire(Kind.ActionResult, document);
 }
 
-function mutationAmount(value: SubscriptionMutationResult): Amount {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (value && typeof value === "object" && typeof value.chargedAmount === "string") {
-    return value.chargedAmount;
-  }
-  throw new SSPError(ErrorCode.BACKEND_FAILURE, "Backend 未返回 charged_amount");
-}
-
 function queryResult(value: SubscriptionQueryResult): { channels: readonly string[]; chargedAmount: Amount } {
   if (value && typeof value === "object" && !Array.isArray(value) && "channels" in value && "chargedAmount" in value) {
     const result = value as SubscriptionQueryResult;
     return { channels: result.channels, chargedAmount: result.chargedAmount };
   }
   throw new SSPError(ErrorCode.BACKEND_FAILURE, "Backend 未返回 channels 和 charged_amount");
-}
-
-function dispatchAmount(value: DispatchResult): Amount {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (value && typeof value === "object" && typeof value.chargedAmount === "string") {
-    return value.chargedAmount;
-  }
-  throw new SSPError(ErrorCode.DISPATCH_FAILURE, "Dispatcher 未返回 charged_amount");
 }
 
 function isRejected(error: unknown): boolean {
