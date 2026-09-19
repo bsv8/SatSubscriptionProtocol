@@ -16,13 +16,19 @@ const requiredBindings = [
   "subscriptions-request-wire = [wire-version, subscriptions-request-kind, subscriptions-request-document]",
   "subscriptions-response-wire = [wire-version, subscriptions-response-kind, subscriptions-response-document]",
   "action-result-wire = [wire-version, action-result-kind, action-result-document]",
+  "billing-request-wire = [wire-version, billing-request-kind, billing-request-document]",
+  "billing-response-wire = [wire-version, billing-response-kind, billing-response-document]",
   "publish-document = (bstr .cbor publish) .size (1..1048512)",
   "subscribe-document = (bstr .cbor subscribe) .size (1..1048512)",
   "unsubscribe-document = (bstr .cbor unsubscribe) .size (1..1048512)",
   "subscriptions-request-document = (bstr .cbor subscriptions-request) .size (1..1048512)",
   "subscriptions-response-document = (bstr .cbor subscriptions-response) .size (1..1048512)",
   "action-result-document = (bstr .cbor action-result) .size (1..1048512)",
+  "billing-request-document = (bstr .cbor billing-request) .size (1..1048512)",
+  "billing-response-document = (bstr .cbor billing-response) .size (1..1048512)",
   "action-result = [request-id, true, charged-amount, \"\"] / [request-id, false, \"0\", action-error-code]",
+  "billing-request = [request-id, from-ms, to-ms, billing-limit, billing-cursor]",
+  "billing-response = [request-id, true, billing-text, billing-text, billing-records, billing-cursor, \"\"]\n                 / [request-id, false, \"\", \"\", [], \"\", action-error-code]",
 ];
 
 for (const binding of requiredBindings) {
@@ -42,6 +48,10 @@ const compatibleSource = source
   .replace(
     'action-result = [request-id, true, charged-amount, ""] / [request-id, false, "0", action-error-code]',
     "action-result = [request-id, any, charged-amount, any]",
+  )
+  .replace(
+    'billing-response = [request-id, true, billing-text, billing-text, billing-records, billing-cursor, ""]\n                 / [request-id, false, "", "", [], "", action-error-code]',
+    "billing-response = [request-id, any, any, any, any, any, any]",
   );
 const temporaryDirectory = await mkdtemp(join(tmpdir(), "ssp-cddl-"));
 const temporaryPath = join(temporaryDirectory, "ssp.cddl");

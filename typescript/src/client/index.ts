@@ -1,6 +1,7 @@
 /** SSP 客户端报文构造和指定报文解析 API。 */
 import {
   ActionResult,
+  BillingResponse,
   cloneBytes,
   ErrorCode,
   Kind,
@@ -11,9 +12,12 @@ import {
 } from "../protocol/index.js";
 import {
   decodeActionResultDocument,
+  decodeBillingResponseDocument,
   decodePublishDocument,
   decodeSubscriptionsResponseDocument,
   encodeActionResultDocument,
+  encodeBillingRequestDocument,
+  encodeBillingResponseDocument,
   encodePublishDocument,
   encodeSubscribeDocument,
   encodeSubscriptionsRequestDocument,
@@ -47,6 +51,17 @@ export function newSubscriptionsRequest(requestId: RequestId): Uint8Array {
   return encodeWire(Kind.SubscriptionsRequest, encodeSubscriptionsRequestDocument({ requestId }));
 }
 
+/** 创建账单分页查询 Wire；时间使用 Unix 毫秒 bigint，第一页 cursor 为空。 */
+export function newBillingRequest(
+  requestId: RequestId,
+  fromMs: bigint,
+  toMs: bigint,
+  limit: number,
+  cursor: string,
+): Uint8Array {
+  return encodeWire(Kind.BillingRequest, encodeBillingRequestDocument({ requestId, fromMs, toMs, limit, cursor }));
+}
+
 /** 创建 ActionResult Wire，供服务实现或测试构造响应。 */
 export function newActionResult(result: ActionResult): Uint8Array {
   return encodeWire(Kind.ActionResult, encodeActionResultDocument(result));
@@ -55,6 +70,11 @@ export function newActionResult(result: ActionResult): Uint8Array {
 /** 创建 SubscriptionsResponse Wire，供服务实现或测试构造响应。 */
 export function newSubscriptionsResponse(result: SubscriptionsResponse): Uint8Array {
   return encodeWire(Kind.SubscriptionsResponse, encodeSubscriptionsResponseDocument(result));
+}
+
+/** 创建 BillingResponse Wire，供服务实现或测试构造响应。 */
+export function newBillingResponse(result: BillingResponse): Uint8Array {
+  return encodeWire(Kind.BillingResponse, encodeBillingResponseDocument(result));
 }
 
 /** 严格解析 Publish Wire，返回 request_id 和原始 contentJson 字节。 */
@@ -82,4 +102,13 @@ export function parseSubscriptionsResponse(wireCbor: Uint8Array): SubscriptionsR
     throw new SSPError(ErrorCode.INVALID_WIRE, "期望 SubscriptionsResponse Wire");
   }
   return decodeSubscriptionsResponseDocument(message.document);
+}
+
+/** 严格解析 BillingResponse Wire。 */
+export function parseBillingResponse(wireCbor: Uint8Array): BillingResponse {
+  const message = parse(wireCbor);
+  if (message.kind !== Kind.BillingResponse) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "期望 BillingResponse Wire");
+  }
+  return decodeBillingResponseDocument(message.document);
 }

@@ -19,7 +19,7 @@ type Kind uint64
 
 const (
 	// SDKVersion 是 Go 与 TypeScript SDK 对齐的发布版本。
-	SDKVersion = "0.2.0"
+	SDKVersion = "0.3.0"
 
 	// WireVersion 是 SSP V1 的固定 Wire 版本常量。
 	WireVersion Version = 1
@@ -36,6 +36,10 @@ const (
 	SubscriptionsResponseKind Kind = 5
 	// ActionResultKind 表示返回动作成功/失败及实际扣费金额。
 	ActionResultKind Kind = 6
+	// BillingRequestKind 表示查询当前已认证身份账单的请求。
+	BillingRequestKind Kind = 7
+	// BillingResponseKind 表示返回账单分页记录或固定错误码。
+	BillingResponseKind Kind = 8
 
 	// RequestIDBytes 是 request_id 的固定字节长度。
 	RequestIDBytes = 32
@@ -56,6 +60,14 @@ const (
 	MaxContentJSONBytes = 1_048_000
 	// MaxSubscriptions 是一个订阅集合允许的最大元素数。
 	MaxSubscriptions = 1_024
+	// MaxBillingLimit 是一次账单查询允许请求的最大记录数。
+	MaxBillingLimit uint64 = 100
+	// MaxBillingRecords 是一页账单响应允许返回的最大记录数。
+	MaxBillingRecords = 100
+	// MaxBillingTextBytes 是账单标识、动作、货币和网络文本的 UTF-8 字节上限。
+	MaxBillingTextBytes = 256
+	// MaxBillingCursorBytes 是不透明分页游标的 UTF-8 字节上限。
+	MaxBillingCursorBytes = 256
 )
 
 // ErrorCode 是 SDK 对外稳定的本地错误分类。
@@ -302,6 +314,150 @@ func ValidateActionResult(result ActionResult) error {
 	return nil
 }
 
+// BillingRequest 是查询当前已认证身份账单的一页请求。
+// from_ms 包含，to_ms 不包含；cursor 为空表示第一页。
+type BillingRequest struct {
+	// RequestID 是同一 Stream 内关联账单请求与响应的编号。
+	RequestID RequestID
+	// FromMS 是发生时间范围的起点，单位为 Unix 毫秒，包含该时刻。
+	FromMS uint64
+	// ToMS 是发生时间范围的终点，单位为 Unix 毫秒，不包含该时刻。
+	ToMS uint64
+	// Limit 是本页最多返回的记录数，范围为 1..100。
+	Limit uint64
+	// Cursor 是不透明分页游标；第一页必须为空。
+	Cursor string
+}
+
+// ChargeRecord 是一条实际发生的正扣费记录。
+// 免费操作和失败操作不应出现在账单记录中。
+type ChargeRecord struct {
+	// ChargeID 是账单记录唯一编号，当前由 operation_id 映射而来。
+	ChargeID string
+	// OccurredAtMS 是扣费发生时间，单位为 Unix 毫秒。
+	OccurredAtMS uint64
+	// Action 是产生扣费的 SSP 动作名称。
+	Action string
+	// Channel 是产生扣费的 channel；订阅相关动作允许 "*"。
+	Channel string
+	// SourceRequestID 是产生扣费的 SSP 请求编号。
+	SourceRequestID RequestID
+	// ChargedAmount 是精确十进制正金额，不使用浮点数。
+	ChargedAmount Amount
+}
+
+// BillingPage 是 Backend 返回的一页账单数据。
+type BillingPage struct {
+	// Currency 是金额货币标识，例如 BSV；由 Backend/部署配置提供。
+	Currency string
+	// Network 是账单所属网络标识，例如 mainnet 或 testnet。
+	Network string
+	// Records 是按 Backend 定义顺序返回的实际正扣费记录。
+	Records []ChargeRecord
+	// NextCursor 是下一页不透明游标；没有下一页时为空。
+	NextCursor string
+}
+
+// ChargeRecordPage 是 BillingPage 的兼容别名，便于调用方按记录分页语义命名。
+type ChargeRecordPage = BillingPage
+
+// BillingResponse 是账单查询响应；失败时除 request_id 和 error_code 外字段均为空。
+type BillingResponse struct {
+	// RequestID 是原样回显的账单请求编号。
+	RequestID RequestID
+	// Success 表示账单查询是否成功。
+	Success bool
+	// Currency 是成功结果的金额货币标识。
+	Currency string
+	// Network 是成功结果的账单网络标识。
+	Network string
+	// Records 是成功结果的实际正扣费记录页。
+	Records []ChargeRecord
+	// NextCursor 是成功结果的下一页不透明游标。
+	NextCursor string
+	// ErrorCode 成功为空；失败只能是三个固定线上错误码之一。
+	ErrorCode string
+}
+
+// ValidateBillingRequest 校验账单查询的范围、页大小和游标。
+func ValidateBillingRequest(request BillingRequest) error {
+	if request.FromMS > request.ToMS {
+		return fmt.Errorf("%w: billing from_ms must be less than or equal to to_ms", ErrInvalidWire)
+	}
+	if request.Limit < 1 || request.Limit > MaxBillingLimit {
+		return fmt.Errorf("%w: billing limit must be between 1 and %d", ErrInvalidWire, MaxBillingLimit)
+	}
+	return validateBillingText(request.Cursor, MaxBillingCursorBytes, true, "billing cursor")
+}
+
+// ValidateChargeRecord 校验账单记录字段和“只返回正扣费”的约束。
+func ValidateChargeRecord(record ChargeRecord) error {
+	if err := validateBillingText(record.ChargeID, MaxBillingTextBytes, false, "charge_id"); err != nil {
+		return err
+	}
+	if err := validateBillingText(record.Action, MaxBillingTextBytes, false, "action"); err != nil {
+		return err
+	}
+	if err := ValidateChannel(record.Channel, true); err != nil {
+		return fmt.Errorf("%w: billing record channel is invalid", ErrInvalidWire)
+	}
+	if err := ValidateAmount(record.ChargedAmount.String()); err != nil {
+		return err
+	}
+	if record.ChargedAmount == ZeroAmount {
+		return fmt.Errorf("%w: billing record charged_amount must be positive", ErrInvalidWire)
+	}
+	return nil
+}
+
+// ValidateBillingPage 校验 Backend 返回的成功账单页。
+func ValidateBillingPage(page BillingPage) error {
+	if err := validateBillingText(page.Currency, MaxBillingTextBytes, false, "currency"); err != nil {
+		return err
+	}
+	if err := validateBillingText(page.Network, MaxBillingTextBytes, false, "network"); err != nil {
+		return err
+	}
+	if len(page.Records) > MaxBillingRecords {
+		return fmt.Errorf("%w: billing records exceed the configured page limit", ErrInvalidWire)
+	}
+	if err := validateBillingText(page.NextCursor, MaxBillingCursorBytes, true, "next_cursor"); err != nil {
+		return err
+	}
+	for index, record := range page.Records {
+		if err := ValidateChargeRecord(record); err != nil {
+			return fmt.Errorf("%w: invalid billing record at index %d: %v", ErrInvalidWire, index, err)
+		}
+	}
+	return nil
+}
+
+// ValidateBillingResponse 校验 BillingResponse 的成功/失败字段组合。
+func ValidateBillingResponse(response BillingResponse) error {
+	if response.Success {
+		if response.ErrorCode != "" {
+			return fmt.Errorf("%w: successful BillingResponse must have empty error_code", ErrInvalidWire)
+		}
+		return ValidateBillingPage(BillingPage{
+			Currency:   response.Currency,
+			Network:    response.Network,
+			Records:    response.Records,
+			NextCursor: response.NextCursor,
+		})
+	}
+	if response.Currency != "" || response.Network != "" || len(response.Records) != 0 || response.NextCursor != "" || !IsActionErrorCode(response.ErrorCode) {
+		return fmt.Errorf("%w: failed BillingResponse must have empty page fields and a fixed error_code", ErrInvalidWire)
+	}
+	return nil
+}
+
+func validateBillingText(value string, maximum int, allowEmpty bool, field string) error {
+	if (!allowEmpty && value == "") || len(value) > maximum || !utf8.ValidString(value) {
+		return fmt.Errorf("%w: %s is empty, invalid UTF-8, or too long", ErrInvalidWire, field)
+	}
+	return nil
+}
+
 // PublicKey 是外层认证提供的 33 字节公钥字节；它不进入 SSP Wire。
 type PublicKey [33]byte
 
@@ -394,10 +550,10 @@ func CloneBytes(input []byte) []byte {
 	return output
 }
 
-// IsKind 判断 Kind 是否属于 SSP V1 的六种固定消息类型。
+// IsKind 判断 Kind 是否属于 SSP V1 的八种固定消息类型。
 func IsKind(kind Kind) bool {
 	switch kind {
-	case PublishKind, SubscribeKind, UnsubscribeKind, SubscriptionsRequestKind, SubscriptionsResponseKind, ActionResultKind:
+	case PublishKind, SubscribeKind, UnsubscribeKind, SubscriptionsRequestKind, SubscriptionsResponseKind, ActionResultKind, BillingRequestKind, BillingResponseKind:
 		return true
 	default:
 		return false

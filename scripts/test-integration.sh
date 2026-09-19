@@ -77,6 +77,12 @@ ts_billing="$tmp_dir/ts-billing.json"
 (cd "$repo_dir" && node typescript/test/integration-cli.js billing) > "$ts_billing"
 compare_json_files "$go_billing" "$ts_billing"
 
+go_billing_query="$tmp_dir/go-billing-query.json"
+ts_billing_query="$tmp_dir/ts-billing-query.json"
+(cd "$repo_dir" && go run ./integration/fixture -mode billing-query) > "$go_billing_query"
+(cd "$repo_dir" && node typescript/test/integration-cli.js billing-query) > "$ts_billing_query"
+compare_json_files "$go_billing_query" "$ts_billing_query"
+
 "$repo_dir/scripts/test-examples.sh"
 
 echo "SSP Go ↔ TypeScript 纯核心集成通过"

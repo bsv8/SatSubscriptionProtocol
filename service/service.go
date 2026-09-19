@@ -132,6 +132,9 @@ func (session *Session) HandleMessage(ctx context.Context, wireCBOR []byte) (Res
 
 	request, err := wire.DecodeRequest(envelope)
 	if err != nil {
+		if envelope.Message.Kind == protocol.BillingRequestKind {
+			return session.billingFailure(envelope.RequestID, protocol.ActionErrorInvalidRequest)
+		}
 		return session.actionFailure(envelope.RequestID, protocol.ActionErrorInvalidRequest)
 	}
 
@@ -144,6 +147,8 @@ func (session *Session) HandleMessage(ctx context.Context, wireCBOR []byte) (Res
 		return session.handleSubscriptions(ctx, request.SubscriptionsRequest)
 	case protocol.PublishKind:
 		return session.handlePublish(ctx, request.Publish)
+	case protocol.BillingRequestKind:
+		return session.handleBilling(ctx, request.BillingRequest)
 	default:
 		return Result{}, fmt.Errorf("%w: unsupported client request kind", protocol.ErrUnsupportedKind)
 	}
@@ -240,6 +245,35 @@ func (session *Session) handlePublish(ctx context.Context, publish protocol.Publ
 	return session.actionSuccess(publish.RequestID, amount)
 }
 
+func (session *Session) handleBilling(ctx context.Context, request protocol.BillingRequest) (Result, error) {
+	if session.backend == nil {
+		return session.billingFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("ListChargeRecords", errors.New("billing backend is required")))
+	}
+	page, err := session.backend.ListChargeRecords(ctx, session.remotePublicKey, request)
+	if err != nil {
+		return session.billingFailureWithCause(request.RequestID, actionErrorCode(err), wrapBackendFailure("ListChargeRecords", err))
+	}
+	if validationErr := protocol.ValidateBillingPage(page); validationErr != nil {
+		return session.billingFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("ListChargeRecords returned invalid page", validationErr))
+	}
+	if uint64(len(page.Records)) > request.Limit {
+		return session.billingFailureWithCause(request.RequestID, protocol.ActionErrorInternalError,
+			wrapBackendFailure("ListChargeRecords returned too many records", errors.New("records exceed requested limit")))
+	}
+	response := protocol.BillingResponse{
+		RequestID:  request.RequestID,
+		Success:    true,
+		Currency:   page.Currency,
+		Network:    page.Network,
+		Records:    append([]protocol.ChargeRecord(nil), page.Records...),
+		NextCursor: page.NextCursor,
+		ErrorCode:  "",
+	}
+	return session.encodeBillingResponse(response)
+}
+
 func (session *Session) actionSuccess(requestID protocol.RequestID, amount protocol.Amount) (Result, error) {
 	return session.encodeActionResult(protocol.ActionResult{
 		RequestID:     requestID,
@@ -269,6 +303,19 @@ func (session *Session) actionFailureWithCause(requestID protocol.RequestID, err
 	return result, nil
 }
 
+func (session *Session) billingFailure(requestID protocol.RequestID, errorCode string) (Result, error) {
+	return session.billingFailureWithCause(requestID, errorCode, nil)
+}
+
+func (session *Session) billingFailureWithCause(requestID protocol.RequestID, errorCode string, cause error) (Result, error) {
+	return session.encodeBillingResponseWithCause(protocol.BillingResponse{
+		RequestID: requestID,
+		Success:   false,
+		Records:   []protocol.ChargeRecord{},
+		ErrorCode: errorCode,
+	}, cause)
+}
+
 func (session *Session) encodeActionResult(action protocol.ActionResult) (Result, error) {
 	document, err := wire.EncodeActionResultDocument(action)
 	if err != nil {
@@ -279,6 +326,22 @@ func (session *Session) encodeActionResult(action protocol.ActionResult) (Result
 		return Result{}, err
 	}
 	return Result{Response: protocol.CloneBytes(encoded), HasResponse: true}, nil
+}
+
+func (session *Session) encodeBillingResponse(response protocol.BillingResponse) (Result, error) {
+	return session.encodeBillingResponseWithCause(response, nil)
+}
+
+func (session *Session) encodeBillingResponseWithCause(response protocol.BillingResponse, cause error) (Result, error) {
+	document, err := wire.EncodeBillingResponseDocument(response)
+	if err != nil {
+		return Result{}, err
+	}
+	encoded, err := wire.EncodeWire(protocol.BillingResponseKind, document)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Response: protocol.CloneBytes(encoded), HasResponse: true, Cause: cause}, nil
 }
 
 func actionErrorCode(err error) string {

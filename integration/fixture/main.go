@@ -21,15 +21,32 @@ type wireFixture struct {
 }
 
 type wireCase struct {
-	Name           string   `json:"name"`
-	Kind           uint64   `json:"kind"`
-	RequestIDHex   string   `json:"request_id_hex"`
-	Channel        string   `json:"channel"`
-	ContentJSONHex string   `json:"content_json_hex"`
-	ChargedAmount  string   `json:"charged_amount"`
-	Channels       []string `json:"channels"`
-	Success        bool     `json:"success"`
-	ErrorCode      string   `json:"error_code"`
+	Name           string             `json:"name"`
+	Kind           uint64             `json:"kind"`
+	RequestIDHex   string             `json:"request_id_hex"`
+	Channel        string             `json:"channel"`
+	ContentJSONHex string             `json:"content_json_hex"`
+	ChargedAmount  string             `json:"charged_amount"`
+	Channels       []string           `json:"channels"`
+	Success        bool               `json:"success"`
+	ErrorCode      string             `json:"error_code"`
+	FromMS         uint64             `json:"from_ms"`
+	ToMS           uint64             `json:"to_ms"`
+	Limit          uint64             `json:"limit"`
+	Cursor         string             `json:"cursor"`
+	Currency       string             `json:"currency"`
+	Network        string             `json:"network"`
+	Records        []chargeRecordCase `json:"records"`
+	NextCursor     string             `json:"next_cursor"`
+}
+
+type chargeRecordCase struct {
+	ChargeID           string `json:"charge_id"`
+	OccurredAtMS       uint64 `json:"occurred_at_ms"`
+	Action             string `json:"action"`
+	Channel            string `json:"channel"`
+	SourceRequestIDHex string `json:"source_request_id_hex"`
+	ChargedAmount      string `json:"charged_amount"`
 }
 
 type exchangeCase struct {
@@ -148,6 +165,31 @@ type billingExchangeCase struct {
 	ResponseHex string `json:"response_hex"`
 }
 
+type billingQueryFixture struct {
+	PayerIDHex string             `json:"payer_id_hex"`
+	Cases      []billingQueryCase `json:"cases"`
+}
+
+type billingQueryCase struct {
+	Name               string             `json:"name"`
+	RequestIDHex       string             `json:"request_id_hex"`
+	FromMS             uint64             `json:"from_ms"`
+	ToMS               uint64             `json:"to_ms"`
+	Limit              uint64             `json:"limit"`
+	Cursor             string             `json:"cursor"`
+	ExpectedSuccess    bool               `json:"expected_success"`
+	ExpectedCurrency   string             `json:"expected_currency"`
+	ExpectedNetwork    string             `json:"expected_network"`
+	ExpectedRecords    []chargeRecordCase `json:"expected_records"`
+	ExpectedNextCursor string             `json:"expected_next_cursor"`
+	ExpectedErrorCode  string             `json:"expected_error_code"`
+}
+
+type billingQueryExchangeCase struct {
+	Name        string `json:"name"`
+	ResponseHex string `json:"response_hex"`
+}
+
 type dispatchExchange struct {
 	MatchCases                []matchResult `json:"match_cases"`
 	UniqueMatchingIdentityHex []string      `json:"unique_matching_identity_hex"`
@@ -180,6 +222,8 @@ func main() {
 		value, err = dispatchExchangeResult()
 	case "billing":
 		value, err = billingExchangeResult()
+	case "billing-query":
+		value, err = billingQueryExchangeResult()
 	default:
 		err = fmt.Errorf("unknown mode %q", *mode)
 	}
@@ -241,6 +285,12 @@ func encodeFixtures() ([]exchangeCase, error) {
 				return nil, requestErr
 			}
 			wireBytes, err = client.NewSubscriptionsRequest(requestID)
+		case protocol.BillingRequestKind:
+			requestID, requestErr := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			wireBytes, err = client.NewBillingRequest(requestID, item.FromMS, item.ToMS, item.Limit, item.Cursor)
 		case protocol.SubscriptionsResponseKind:
 			var document []byte
 			requestID, requestErr := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
@@ -265,6 +315,34 @@ func encodeFixtures() ([]exchangeCase, error) {
 				return nil, documentErr
 			}
 			wireBytes, err = wire.EncodeWire(protocol.ActionResultKind, document)
+		case protocol.BillingResponseKind:
+			requestID, requestErr := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			records := make([]protocol.ChargeRecord, 0, len(item.Records))
+			for _, record := range item.Records {
+				sourceRequestID, sourceErr := protocol.NewRequestIDFromBytes(mustHex(record.SourceRequestIDHex))
+				if sourceErr != nil {
+					return nil, sourceErr
+				}
+				records = append(records, protocol.ChargeRecord{
+					ChargeID:        record.ChargeID,
+					OccurredAtMS:    record.OccurredAtMS,
+					Action:          record.Action,
+					Channel:         record.Channel,
+					SourceRequestID: sourceRequestID,
+					ChargedAmount:   protocol.Amount(record.ChargedAmount),
+				})
+			}
+			document, documentErr := wire.EncodeBillingResponseDocument(protocol.BillingResponse{
+				RequestID: requestID, Success: item.Success, Currency: item.Currency, Network: item.Network,
+				Records: records, NextCursor: item.NextCursor, ErrorCode: item.ErrorCode,
+			})
+			if documentErr != nil {
+				return nil, documentErr
+			}
+			wireBytes, err = wire.EncodeWire(protocol.BillingResponseKind, document)
 		default:
 			return nil, fmt.Errorf("fixture %s has unknown kind", item.Name)
 		}
@@ -423,6 +501,65 @@ func billingExchangeResult() ([]billingExchangeCase, error) {
 	return result, nil
 }
 
+func billingQueryExchangeResult() ([]billingQueryExchangeCase, error) {
+	var fixture billingQueryFixture
+	if err := readJSON(fixturePath("billing-query-v1.json"), &fixture); err != nil {
+		return nil, err
+	}
+	key, err := protocol.NewPublicKey(mustHex(fixture.PayerIDHex))
+	if err != nil {
+		return nil, err
+	}
+	backend := &billingQueryBackend{}
+	session := service.NewSession(key, backend, service.NewRecordingDispatcher())
+	defer session.Close()
+	result := make([]billingQueryExchangeCase, 0, len(fixture.Cases))
+	for _, item := range fixture.Cases {
+		requestID, requestErr := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+		if requestErr != nil {
+			return nil, requestErr
+		}
+		requestWire, requestErr := client.NewBillingRequest(requestID, item.FromMS, item.ToMS, item.Limit, item.Cursor)
+		if requestErr != nil {
+			return nil, fmt.Errorf("billing query request %s: %w", item.Name, requestErr)
+		}
+		handled, handleErr := session.HandleMessage(context.Background(), requestWire)
+		if handleErr != nil || !handled.HasResponse {
+			return nil, fmt.Errorf("billing query service %s returned result=%#v error=%v", item.Name, handled, handleErr)
+		}
+		response, parseErr := client.ParseBillingResponse(handled.Response)
+		if parseErr != nil {
+			return nil, fmt.Errorf("billing query response %s: %w", item.Name, parseErr)
+		}
+		if err := validateBillingQueryCase(item, response); err != nil {
+			return nil, err
+		}
+		result = append(result, billingQueryExchangeCase{Name: item.Name, ResponseHex: hex.EncodeToString(handled.Response)})
+	}
+	return result, nil
+}
+
+func validateBillingQueryCase(item billingQueryCase, response protocol.BillingResponse) error {
+	requestID, err := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
+	if err != nil {
+		return err
+	}
+	if response.RequestID != requestID || response.Success != item.ExpectedSuccess || response.Currency != item.ExpectedCurrency || response.Network != item.ExpectedNetwork || response.NextCursor != item.ExpectedNextCursor || response.ErrorCode != item.ExpectedErrorCode || len(response.Records) != len(item.ExpectedRecords) {
+		return fmt.Errorf("billing query response %s does not match expected fields: %#v", item.Name, response)
+	}
+	for index, record := range response.Records {
+		want := item.ExpectedRecords[index]
+		sourceRequestID, sourceErr := protocol.NewRequestIDFromBytes(mustHex(want.SourceRequestIDHex))
+		if sourceErr != nil {
+			return sourceErr
+		}
+		if record.ChargeID != want.ChargeID || record.OccurredAtMS != want.OccurredAtMS || record.Action != want.Action || record.Channel != want.Channel || record.SourceRequestID != sourceRequestID || record.ChargedAmount.String() != want.ChargedAmount {
+			return fmt.Errorf("billing query response %s record %d does not match", item.Name, index)
+		}
+	}
+	return nil
+}
+
 func encodeBillingRequest(item billingCase) ([]byte, error) {
 	requestID, err := protocol.NewRequestIDFromBytes(mustHex(item.RequestIDHex))
 	if err != nil {
@@ -481,6 +618,42 @@ type billingBackend struct {
 	memory *subscription.MemoryBackend
 }
 
+type billingQueryBackend struct{}
+
+func (backend *billingQueryBackend) Subscribe(context.Context, protocol.PublicKey, protocol.RequestID, string) (protocol.Amount, error) {
+	return protocol.ZeroAmount, nil
+}
+
+func (backend *billingQueryBackend) Unsubscribe(context.Context, protocol.PublicKey, protocol.RequestID, string) (protocol.Amount, error) {
+	return protocol.ZeroAmount, nil
+}
+
+func (backend *billingQueryBackend) Subscriptions(context.Context, protocol.PublicKey, protocol.RequestID) ([]string, protocol.Amount, error) {
+	return []string{}, protocol.ZeroAmount, nil
+}
+
+func (backend *billingQueryBackend) ListChargeRecords(_ context.Context, _ protocol.PublicKey, request protocol.BillingRequest) (protocol.BillingPage, error) {
+	if request.Cursor == "reject" {
+		return protocol.BillingPage{}, protocol.ErrRejected
+	}
+	if request.Cursor == "cursor-2" {
+		return protocol.BillingPage{Currency: "BSV", Network: "testnet", Records: []protocol.ChargeRecord{}, NextCursor: ""}, nil
+	}
+	sourceRequestID, err := protocol.NewRequestIDFromBytes(mustHex("4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a"))
+	if err != nil {
+		return protocol.BillingPage{}, err
+	}
+	return protocol.BillingPage{
+		Currency: "BSV",
+		Network:  "testnet",
+		Records: []protocol.ChargeRecord{{
+			ChargeID: "operation-1", OccurredAtMS: 1_700_000_000_123, Action: "publish", Channel: "news",
+			SourceRequestID: sourceRequestID, ChargedAmount: protocol.Amount("0.001"),
+		}},
+		NextCursor: "cursor-2",
+	}, nil
+}
+
 func (backend *billingBackend) Subscribe(ctx context.Context, key protocol.PublicKey, requestID protocol.RequestID, channel string) (protocol.Amount, error) {
 	if channel == "reject" {
 		return "", protocol.ErrRejected
@@ -504,6 +677,13 @@ func (backend *billingBackend) Subscriptions(ctx context.Context, key protocol.P
 		return nil, "", err
 	}
 	return channels, protocol.Amount("12.34"), nil
+}
+
+func (backend *billingBackend) ListChargeRecords(ctx context.Context, key protocol.PublicKey, request protocol.BillingRequest) (protocol.BillingPage, error) {
+	if err := protocol.ValidateBillingRequest(request); err != nil {
+		return protocol.BillingPage{}, err
+	}
+	return protocol.BillingPage{Currency: "BSV", Network: "mainnet", Records: []protocol.ChargeRecord{}, NextCursor: ""}, nil
 }
 
 type billingDispatcher struct{}

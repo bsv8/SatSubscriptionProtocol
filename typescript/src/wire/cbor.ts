@@ -1,26 +1,44 @@
 import { ErrorCode, SSPError } from "../protocol/index.js";
 
-/** deterministic CBOR 编码器使用的无符号头部。 */
-export function encodeHead(major: number, value: number): Uint8Array {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new SSPError(ErrorCode.INVALID_WIRE, "CBOR 长度不是安全的非负整数");
+/** deterministic CBOR 编码器使用的无符号头部；数值字段也支持 uint64 bigint。 */
+export function encodeHead(major: number, value: number | bigint): Uint8Array {
+  let normalized: bigint;
+  if (typeof value === "bigint") {
+    normalized = value;
+  } else {
+    if (!Number.isSafeInteger(value)) {
+      throw new SSPError(ErrorCode.INVALID_WIRE, "CBOR 数值不是安全整数");
+    }
+    normalized = BigInt(value);
+  }
+  if (normalized < 0n) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "CBOR 数值不是非负整数");
+  }
+  if (normalized > 0xffffffffffffffffn) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "CBOR uint 超过 uint64 范围");
   }
   const prefix = major << 5;
-  if (value < 24) {
-    return new Uint8Array([prefix | value]);
+  if (normalized < 24n) {
+    return new Uint8Array([prefix | Number(normalized)]);
   }
-  if (value <= 0xff) {
-    return new Uint8Array([prefix | 24, value]);
+  if (normalized <= 0xffn) {
+    return new Uint8Array([prefix | 24, Number(normalized)]);
   }
-  if (value <= 0xffff) {
-    return new Uint8Array([prefix | 25, value >>> 8, value & 0xff]);
+  if (normalized <= 0xffffn) {
+    return new Uint8Array([prefix | 25, Number(normalized >> 8n), Number(normalized & 0xffn)]);
   }
-  if (value <= 0xffffffff) {
-    return new Uint8Array([prefix | 26, value >>> 24, value >>> 16, value >>> 8, value & 0xff]);
+  if (normalized <= 0xffffffffn) {
+    return new Uint8Array([
+      prefix | 26,
+      Number(normalized >> 24n),
+      Number((normalized >> 16n) & 0xffn),
+      Number((normalized >> 8n) & 0xffn),
+      Number(normalized & 0xffn),
+    ]);
   }
   const result = new Uint8Array(9);
   result[0] = prefix | 27;
-  let remaining = BigInt(value);
+  let remaining = normalized;
   for (let index = 8; index >= 1; index -= 1) {
     result[index] = Number(remaining & 0xffn);
     remaining >>= 8n;

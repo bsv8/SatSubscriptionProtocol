@@ -1,20 +1,24 @@
 /** 无网络 SSP 服务入口、Session 和窄 Dispatcher 抽象。 */
 import {
-  ActionErrorCode,
-  Amount,
-  cloneBytes,
+	ActionErrorCode,
+	Amount,
+	BillingPage,
+	BillingRequest,
+	cloneBytes,
   ErrorCode,
-  Kind,
+	Kind,
   MAX_REQUEST_IDS_PER_SESSION,
   PublicKey,
   RequestId,
-  SSPError,
+	SSPError,
+	validateBillingPage,
   validateAmount,
   validatePublicKey,
 } from "../protocol/index.js";
 import {
-  decodeRequest,
-  encodeActionResultDocument,
+	decodeRequest,
+	encodeActionResultDocument,
+	encodeBillingResponseDocument,
   encodeSubscriptionsResponseDocument,
   encodeWire,
   parseRequestEnvelope,
@@ -93,9 +97,12 @@ export class Session {
 
     let request;
     try {
-      request = decodeRequest(envelope);
-    } catch {
-      return { response: actionResult(envelope.requestId, false, "0", ActionErrorCode.INVALID_REQUEST), suppressed: false };
+		request = decodeRequest(envelope);
+	} catch {
+		if (envelope.message.kind === Kind.BillingRequest) {
+			return { response: billingResult(envelope.requestId, false, "", "", [], "", ActionErrorCode.INVALID_REQUEST), suppressed: false };
+		}
+		return { response: actionResult(envelope.requestId, false, "0", ActionErrorCode.INVALID_REQUEST), suppressed: false };
     }
 
     switch (request.kind) {
@@ -107,6 +114,8 @@ export class Session {
         return this.handleSubscriptions(request.subscriptionsRequest!, envelope.requestId);
       case Kind.Publish:
         return this.handlePublish(request.publish!, envelope.requestId);
+      case Kind.BillingRequest:
+        return this.handleBilling(request.billingRequest!, envelope.requestId);
       default:
         throw new SSPError(ErrorCode.UNSUPPORTED_KIND, "不是客户端请求 Kind");
     }
@@ -188,6 +197,24 @@ export class Session {
     }
   }
 
+  private async handleBilling(request: BillingRequest, requestId: RequestId): Promise<SessionResult> {
+    if (!this.backend || typeof this.backend.listChargeRecords !== "function") {
+      return this.billingFailureWithCause(requestId, ActionErrorCode.INTERNAL_ERROR,
+        new SSPError(ErrorCode.BACKEND_FAILURE, "Backend 未配置账单查询能力"));
+    }
+    try {
+      const page = await this.backend.listChargeRecords(this.remotePublicKey, request);
+      validateBillingPage(page);
+      if (page.records.length > request.limit) {
+        throw new SSPError(ErrorCode.BACKEND_FAILURE, "Backend 返回的账单记录超过请求 limit");
+      }
+      const response = billingResult(requestId, true, page.currency, page.network, page.records, page.nextCursor, "");
+      return { response, suppressed: false };
+    } catch (error) {
+      return this.billingFailureWithCause(requestId, isRejected(error) ? ActionErrorCode.REJECTED : ActionErrorCode.INTERNAL_ERROR, error);
+    }
+  }
+
   private failureWithCause(
     requestId: RequestId,
     errorCode: typeof ActionErrorCode[keyof typeof ActionErrorCode],
@@ -199,6 +226,18 @@ export class Session {
       response,
       suppressed: false,
       cause: new SSPError(diagnosticCode, "业务 Backend/Dispatcher 处理失败", { cause }),
+    };
+  }
+
+  private billingFailureWithCause(
+    requestId: RequestId,
+    errorCode: typeof ActionErrorCode[keyof typeof ActionErrorCode],
+    cause: unknown,
+  ): SessionResult {
+    return {
+      response: billingResult(requestId, false, "", "", [], "", errorCode),
+      suppressed: false,
+      cause: new SSPError(ErrorCode.BACKEND_FAILURE, "账单 Backend 处理失败", { cause }),
     };
   }
 
@@ -248,6 +287,26 @@ function actionResult(requestId: RequestId, success: boolean, chargedAmount: Amo
     errorCode,
   });
   return encodeWire(Kind.ActionResult, document);
+}
+
+function billingResult(
+  requestId: RequestId,
+  success: boolean,
+  currency: string,
+  network: string,
+  records: BillingPage["records"],
+  nextCursor: string,
+  errorCode: "" | typeof ActionErrorCode[keyof typeof ActionErrorCode],
+): Uint8Array {
+  return encodeWire(Kind.BillingResponse, encodeBillingResponseDocument({
+    requestId: cloneBytes(requestId),
+    success,
+    currency,
+    network,
+    records,
+    nextCursor,
+    errorCode,
+  }));
 }
 
 function queryResult(value: SubscriptionQueryResult): { channels: readonly string[]; chargedAmount: Amount } {

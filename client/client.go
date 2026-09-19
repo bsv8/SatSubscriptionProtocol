@@ -51,6 +51,22 @@ func NewSubscriptionsRequest(requestID protocol.RequestID) ([]byte, error) {
 	return wire.EncodeWire(protocol.SubscriptionsRequestKind, document)
 }
 
+// NewBillingRequest 创建账单分页查询 Wire。
+// fromMS 包含，toMS 不包含；第一页 cursor 传空字符串，时间使用 Unix 毫秒。
+func NewBillingRequest(requestID protocol.RequestID, fromMS, toMS, limit uint64, cursor string) ([]byte, error) {
+	document, err := wire.EncodeBillingRequestDocument(protocol.BillingRequest{
+		RequestID: requestID,
+		FromMS:    fromMS,
+		ToMS:      toMS,
+		Limit:     limit,
+		Cursor:    cursor,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return wire.EncodeWire(protocol.BillingRequestKind, document)
+}
+
 // ParsePublish 严格解析 Publish Wire，返回 request_id、channel 和原始 content_json 字节。
 func ParsePublish(wireCBOR []byte) (protocol.Publish, error) {
 	message, err := wire.Parse(wireCBOR)
@@ -85,4 +101,16 @@ func ParseSubscriptionsResponse(wireCBOR []byte) (protocol.SubscriptionsResponse
 		return protocol.SubscriptionsResponse{}, fmt.Errorf("%w: expected SubscriptionsResponse Wire", protocol.ErrInvalidWire)
 	}
 	return wire.DecodeSubscriptionsResponseDocument(message.Document)
+}
+
+// ParseBillingResponse 严格解析 BillingResponse Wire。
+func ParseBillingResponse(wireCBOR []byte) (protocol.BillingResponse, error) {
+	message, err := wire.Parse(wireCBOR)
+	if err != nil {
+		return protocol.BillingResponse{}, err
+	}
+	if message.Kind != protocol.BillingResponseKind {
+		return protocol.BillingResponse{}, fmt.Errorf("%w: expected BillingResponse Wire", protocol.ErrInvalidWire)
+	}
+	return wire.DecodeBillingResponseDocument(message.Document)
 }

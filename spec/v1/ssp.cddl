@@ -11,6 +11,8 @@ ssp-wire = publish-wire
          / subscriptions-request-wire
          / subscriptions-response-wire
          / action-result-wire
+         / billing-request-wire
+         / billing-response-wire
 
 wire-version = 1
 
@@ -20,6 +22,8 @@ unsubscribe-kind = 3
 subscriptions-request-kind = 4
 subscriptions-response-kind = 5
 action-result-kind = 6
+billing-request-kind = 7
+billing-response-kind = 8
 
 publish-wire = [wire-version, publish-kind, publish-document]
 subscribe-wire = [wire-version, subscribe-kind, subscribe-document]
@@ -27,6 +31,8 @@ unsubscribe-wire = [wire-version, unsubscribe-kind, unsubscribe-document]
 subscriptions-request-wire = [wire-version, subscriptions-request-kind, subscriptions-request-document]
 subscriptions-response-wire = [wire-version, subscriptions-response-kind, subscriptions-response-document]
 action-result-wire = [wire-version, action-result-kind, action-result-document]
+billing-request-wire = [wire-version, billing-request-kind, billing-request-document]
+billing-response-wire = [wire-version, billing-response-kind, billing-response-document]
 
 publish-document = (bstr .cbor publish) .size (1..1048512)
 subscribe-document = (bstr .cbor subscribe) .size (1..1048512)
@@ -34,12 +40,16 @@ unsubscribe-document = (bstr .cbor unsubscribe) .size (1..1048512)
 subscriptions-request-document = (bstr .cbor subscriptions-request) .size (1..1048512)
 subscriptions-response-document = (bstr .cbor subscriptions-response) .size (1..1048512)
 action-result-document = (bstr .cbor action-result) .size (1..1048512)
+billing-request-document = (bstr .cbor billing-request) .size (1..1048512)
+billing-response-document = (bstr .cbor billing-response) .size (1..1048512)
 
 request-id = bytes .size 32
 channel = text .size (1..256)
 content-json = bytes .size (1..1048000)
 charged-amount = text .size (1..64)
 action-error-code = "INVALID_REQUEST" / "REJECTED" / "INTERNAL_ERROR"
+billing-text = text .size (1..256)
+billing-cursor = text .size (0..256)
 
 ; Kind 1: Publish（发布请求或广播交付）
 publish = [request-id, channel, content-json]
@@ -60,11 +70,29 @@ channels = [*1024 channel]
 ; Kind 6: ActionResult（动作成功/失败和本次实际扣费）
 action-result = [request-id, true, charged-amount, ""] / [request-id, false, "0", action-error-code]
 
+; Kind 7: BillingRequest（查询当前已认证身份自己的账单）
+billing-request = [request-id, from-ms, to-ms, billing-limit, billing-cursor]
+from-ms = uint ; 开始时间，Unix 毫秒，包含
+to-ms = uint ; 结束时间，Unix 毫秒，不包含
+billing-limit = uint ; 运行时限制为 1..100
+
+; Kind 8: BillingResponse（账单记录分页或错误）
+billing-response = [request-id, true, billing-text, billing-text, billing-records, billing-cursor, ""]
+                 / [request-id, false, "", "", [], "", action-error-code]
+billing-records = [*100 charge-record]
+charge-record = [charge-id, occurred-at-ms, action, channel, source-request-id, charged-amount]
+charge-id = billing-text ; 当前由 operation_id 映射
+occurred-at-ms = uint ; 扣费发生时间，Unix 毫秒
+action = billing-text ; 产生扣费的 SSP 动作名称
+source-request-id = request-id
+
 ; CDDL 能表达 Kind 与子文档绑定以及 ActionResult 的主要字段组合；
 ; 金额规范十进制、channel 的 wildcard 位置、channels 排序和 content-json
 ; 是否为完整 JSON 仍由 Go/TypeScript 运行时校验。
 ; charged_amount 规范形式：无符号十进制、最多 18 位小数、无多余前导零、
 ; 无小数末尾零；免费和失败固定为 "0"。
+; BillingResponse.records 只允许实际正扣费记录；免费和失败操作不返回。
+; BillingRequest 的 from_ms 包含、to_ms 不包含；cursor 是不透明分页游标。
 
 ; Frozen SDK limits（冻结的 SDK 限制）:
 ; MaxWireBytes = 1048576（完整 Wire 最大 1 MiB）

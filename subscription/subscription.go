@@ -119,6 +119,9 @@ type Backend interface {
 	Unsubscribe(ctx context.Context, remotePublicKey protocol.PublicKey, requestID protocol.RequestID, channel string) (protocol.Amount, error)
 	// Subscriptions 在同一事务边界中查询并扣费，返回该事务读取的列表和实际扣费金额。
 	Subscriptions(ctx context.Context, remotePublicKey protocol.PublicKey, requestID protocol.RequestID) ([]string, protocol.Amount, error)
+	// ListChargeRecords 在同一事务边界中查询已认证身份自己的账单分页。
+	// Backend 必须只返回实际正扣费记录；免费和失败操作不应出现在 Records 中。
+	ListChargeRecords(ctx context.Context, remotePublicKey protocol.PublicKey, request protocol.BillingRequest) (protocol.BillingPage, error)
 }
 
 // MemoryBackend 是线程安全的进程内 Backend，仅用于测试和示例。
@@ -187,6 +190,24 @@ func (backend *MemoryBackend) Subscriptions(_ context.Context, remotePublicKey p
 		return nil, "", err
 	}
 	return result, protocol.ZeroAmount, nil
+}
+
+// ListChargeRecords 返回空的内存账单页。
+// MemoryBackend 不持久化计费记录，因此只用于协议/Session 测试和示例；
+// 返回固定的示例货币与网络，确保成功 BillingResponse 具备完整元数据。
+func (backend *MemoryBackend) ListChargeRecords(_ context.Context, remotePublicKey protocol.PublicKey, request protocol.BillingRequest) (protocol.BillingPage, error) {
+	if err := validateBackendKey(remotePublicKey); err != nil {
+		return protocol.BillingPage{}, err
+	}
+	if err := protocol.ValidateBillingRequest(request); err != nil {
+		return protocol.BillingPage{}, err
+	}
+	return protocol.BillingPage{
+		Currency:   "BSV",
+		Network:    "mainnet",
+		Records:    []protocol.ChargeRecord{},
+		NextCursor: "",
+	}, nil
 }
 
 func validateBackendKey(remotePublicKey protocol.PublicKey) error {

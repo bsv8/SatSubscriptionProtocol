@@ -5,7 +5,7 @@
 
 ## 1. 边界和目标
 
-Go 与 TypeScript SDK 项目包版本均为 0.2.0；SSP 协议版本仍为 V1。SDK 负责：
+Go 与 TypeScript SDK 项目包版本均为 0.3.0；SSP 协议版本仍为 V1。SDK 负责：
 
 - deterministic CBOR 编解码和严格字段校验；
 - content_json 完整 JSON 与 exact bytes 保留；
@@ -24,7 +24,7 @@ SDK 交付已认证 remote_public_key 和完整 Wire。
 [wire_version, wire_kind, document_cbor]
 ~~~
 
-document_cbor 是内层 deterministic CBOR 完整字节，以 bstr 放入外层。六种 Kind：
+document_cbor 是内层 deterministic CBOR 完整字节，以 bstr 放入外层。八种 Kind：
 
 | Kind | 名称 | 中文含义 |
 |---:|---|---|
@@ -34,6 +34,8 @@ document_cbor 是内层 deterministic CBOR 完整字节，以 bstr 放入外层�
 | 4 | SubscriptionsRequest | 查询订阅集合 |
 | 5 | SubscriptionsResponse | 返回订阅集合和实际扣费 |
 | 6 | ActionResult | 返回动作成功/失败和实际扣费 |
+| 7 | BillingRequest | 查询当前已认证身份自己的账单 |
+| 8 | BillingResponse | 返回账单分页记录或错误 |
 
 内层数组固定为：
 
@@ -44,11 +46,17 @@ Unsubscribe           = [request_id, channel]
 SubscriptionsRequest = [request_id]
 SubscriptionsResponse = [request_id, charged_amount, channels]
 ActionResult           = [request_id, success, charged_amount, error_code]
+BillingRequest         = [request_id, from_ms, to_ms, limit, cursor]
+BillingResponse        = [request_id, success, currency, network, records, next_cursor, error_code]
+ChargeRecord           = [charge_id, occurred_at_ms, action, channel, source_request_id, charged_amount]
 ~~~
 
 所有 request_id 都是固定 32 字节 bstr。响应逐字节回显请求编号。成功动作的金额是接口
 返回的实际扣费；失败固定 "0"。Publish、Subscribe、Unsubscribe 成功返回 ActionResult，
-查询成功返回唯一 SubscriptionsResponse。
+查询成功返回唯一 SubscriptionsResponse；账单查询成功返回唯一 BillingResponse。BillingRequest
+的 from_ms 包含、to_ms 不包含，limit 为 1..100，第一页 cursor 为空；TypeScript 使用 bigint
+承载毫秒时间，避免 JavaScript number 精度损失。BillingResponse 失败时 currency、network、
+records、next_cursor 为空，error_code 复用三个固定线上错误码。
 
 解码先检查外层版本、Kind、document bstr 和 canonical bytes，再在服务 Session 中读取
 request_id，最后校验具体业务字段。这样后续 channel/JSON/字段组合错误可返回
@@ -71,6 +79,9 @@ Result.Cause 使用多重 %w 包装，errors.Is/As 可以同时找到稳定 Back
 分类和原始错误；此时返回 error 为 nil，避免连接层跳过响应。TypeScript 的
 SessionResult.cause 是 SSPError，原始异常位于标准 Error.cause。cause、堆栈和数据库
 文本绝不进入 Wire。
+
+账单记录只允许实际正扣费记录：免费操作和失败操作不返回；charged_amount 保持精确十进制
+字符串。账单身份只取自外层已认证 public key，BillingRequest 不重复传公钥。
 
 ## 4. Session 并发模型
 
@@ -100,6 +111,7 @@ type Backend interface {
     Subscribe(ctx context.Context, publicKey protocol.PublicKey, requestID protocol.RequestID, channel string) (protocol.Amount, error)
     Unsubscribe(ctx context.Context, publicKey protocol.PublicKey, requestID protocol.RequestID, channel string) (protocol.Amount, error)
     Subscriptions(ctx context.Context, publicKey protocol.PublicKey, requestID protocol.RequestID) (channels []string, chargedAmount protocol.Amount, err error)
+    ListChargeRecords(ctx context.Context, publicKey protocol.PublicKey, request protocol.BillingRequest) (page protocol.BillingPage, err error)
 }
 
 type Dispatcher interface {
@@ -107,9 +119,9 @@ type Dispatcher interface {
 }
 ~~~
 
-TypeScript 的 Backend 与 Dispatcher 使用 RequestId 和 Amount，方法名
-分别为 subscribe、unsubscribe、subscriptions、dispatch。成功金额必须是实际扣除
-金额，不是报价。
+TypeScript 的 Backend 与 Dispatcher 使用 RequestId、Amount、BillingRequest 和 BillingPage，
+方法名分别为 subscribe、unsubscribe、subscriptions、listChargeRecords、dispatch。成功金额
+必须是实际扣除金额，不是报价。
 
 Backend 必须在同一事务边界内完成检查、收费和状态变更；查询的列表和收费也必须来自同一
 事务快照。SDK 不实现数据库事务，只验证并规范化 Backend 返回的列表。
@@ -161,10 +173,10 @@ Session 入口；长期 Stream 必须复用同一 Session，订阅交付也不�
 
 Go 与 TypeScript 的冻结值：request_id 32 字节、金额 64 字节/18 位小数、Session 65536、
 Wire 1 MiB、document 1048512 字节、channel 256 字节、JSON 1048000 字节、订阅集合
-1024 个元素。
+1024 个元素、账单单页最多 100 条、账单标识/游标文本最多 256 UTF-8 字节。
 
 ## 8. 测试和依赖
 
-共享 fixture 覆盖六种 Kind、请求编号回显、精确金额、非法金额、响应组合、并发去重、
+共享 fixture 覆盖八种 Kind、账单分页/记录、请求编号回显、精确金额、非法金额、响应组合、并发去重、
 编号上限、cause、JSON exact bytes、订阅状态和跨语言字节一致性。SDK 依赖树不引入 SPI、
 HTTP、WebSocket 或 bitcoin-libp2p 类型。

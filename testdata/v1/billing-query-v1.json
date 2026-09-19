@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "payer_id_hex": "023333333333333333333333333333333333333333333333333333333333333333",
+  "cases": [
+    {
+      "name": "billing-record-page",
+      "request_id_hex": "7171717171717171717171717171717171717171717171717171717171717171",
+      "from_ms": 1700000000000,
+      "to_ms": 1700003600000,
+      "limit": 2,
+      "cursor": "",
+      "expected_success": true,
+      "expected_currency": "BSV",
+      "expected_network": "testnet",
+      "expected_records": [
+        {
+          "charge_id": "operation-1",
+          "occurred_at_ms": 1700000000123,
+          "action": "publish",
+          "channel": "news",
+          "source_request_id_hex": "4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a",
+          "charged_amount": "0.001"
+        }
+      ],
+      "expected_next_cursor": "cursor-2",
+      "expected_error_code": ""
+    },
+    {
+      "name": "billing-empty-page",
+      "request_id_hex": "7272727272727272727272727272727272727272727272727272727272727272",
+      "from_ms": 1700000000000,
+      "to_ms": 1700003600000,
+      "limit": 2,
+      "cursor": "cursor-2",
+      "expected_success": true,
+      "expected_currency": "BSV",
+      "expected_network": "testnet",
+      "expected_records": [],
+      "expected_next_cursor": "",
+      "expected_error_code": ""
+    },
+    {
+      "name": "billing-rejected",
+      "request_id_hex": "7373737373737373737373737373737373737373737373737373737373737373",
+      "from_ms": 1700000000000,
+      "to_ms": 1700003600000,
+      "limit": 2,
+      "cursor": "reject",
+      "expected_success": false,
+      "expected_currency": "",
+      "expected_network": "",
+      "expected_records": [],
+      "expected_next_cursor": "",
+      "expected_error_code": "REJECTED"
+    }
+  ]
+}

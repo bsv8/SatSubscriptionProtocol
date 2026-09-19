@@ -13,7 +13,7 @@ import (
 type Message struct {
 	// Version 是 Wire 版本，V1 固定为 1。
 	Version protocol.Version
-	// Kind 是 SSP V1 六种固定消息类型之一。
+	// Kind 是 SSP V1 八种固定消息类型之一。
 	Kind protocol.Kind
 	// Document 是内层 document_cbor 的 exact bytes 防御性副本。
 	Document []byte
@@ -44,6 +44,8 @@ type RequestDocument struct {
 	Unsubscribe protocol.Unsubscribe
 	// SubscriptionsRequest 是订阅列表查询请求字段。
 	SubscriptionsRequest protocol.SubscriptionsRequest
+	// BillingRequest 是账单分页查询请求字段。
+	BillingRequest protocol.BillingRequest
 }
 
 // EncodeWire 将已验证的内层 document 编码为 [version, kind, document_cbor]。
@@ -129,6 +131,15 @@ func DecodeRequest(envelope RequestEnvelope) (RequestDocument, error) {
 			return RequestDocument{}, fmt.Errorf("%w: request_id changed during decoding", protocol.ErrInvalidWire)
 		}
 		result.SubscriptionsRequest = request
+	case protocol.BillingRequestKind:
+		request, err := DecodeBillingRequestDocument(envelope.Message.Document)
+		if err != nil {
+			return RequestDocument{}, err
+		}
+		if request.RequestID != envelope.RequestID {
+			return RequestDocument{}, fmt.Errorf("%w: request_id changed during decoding", protocol.ErrInvalidWire)
+		}
+		result.BillingRequest = request
 	default:
 		return RequestDocument{}, fmt.Errorf("%w: kind is not a client request", protocol.ErrInvalidWire)
 	}
@@ -248,6 +259,78 @@ func DecodeSubscriptionsRequestDocument(document []byte) (protocol.Subscriptions
 	canonical := EncodeSubscriptionsRequestDocument(candidate)
 	if !bytes.Equal(canonical, document) {
 		return result, fmt.Errorf("%w: subscriptions request is not deterministic CBOR", protocol.ErrNonCanonicalCBOR)
+	}
+	return candidate, nil
+}
+
+// EncodeBillingRequestDocument 编码 BillingRequest 文档
+// [request_id, from_ms, to_ms, limit, cursor]。
+func EncodeBillingRequestDocument(request protocol.BillingRequest) ([]byte, error) {
+	if err := protocol.ValidateBillingRequest(request); err != nil {
+		return nil, err
+	}
+	cursorBytes := []byte(request.Cursor)
+	result := make([]byte, 0, protocol.RequestIDBytes+len(cursorBytes)+32)
+	result = append(result, encodeHead(4, 5)...)
+	result = append(result, encodeHead(2, protocol.RequestIDBytes)...)
+	result = append(result, request.RequestID[:]...)
+	result = append(result, encodeHead(0, request.FromMS)...)
+	result = append(result, encodeHead(0, request.ToMS)...)
+	result = append(result, encodeHead(0, request.Limit)...)
+	result = append(result, encodeHead(3, uint64(len(cursorBytes)))...)
+	result = append(result, cursorBytes...)
+	if len(result) > protocol.MaxDocumentBytes {
+		return nil, fmt.Errorf("%w: document exceeds the configured limit", protocol.ErrMessageTooLarge)
+	}
+	return result, nil
+}
+
+// DecodeBillingRequestDocument 严格解析 BillingRequest 文档。
+func DecodeBillingRequestDocument(document []byte) (protocol.BillingRequest, error) {
+	var result protocol.BillingRequest
+	decoder := newDecoder(document)
+	if err := decoder.readArrayExact(5); err != nil {
+		return result, err
+	}
+	requestID, err := decoder.readFixedRequestID()
+	if err != nil {
+		return result, err
+	}
+	fromMS, err := decoder.readUint()
+	if err != nil {
+		return result, err
+	}
+	toMS, err := decoder.readUint()
+	if err != nil {
+		return result, err
+	}
+	limit, err := decoder.readUint()
+	if err != nil {
+		return result, err
+	}
+	cursor, err := decoder.readTextAllowEmpty(protocol.MaxBillingCursorBytes, protocol.ErrInvalidWire)
+	if err != nil {
+		return result, err
+	}
+	if !decoder.atEnd() {
+		return result, fmt.Errorf("%w: trailing bytes in billing request", protocol.ErrInvalidWire)
+	}
+	candidate := protocol.BillingRequest{
+		RequestID: requestID,
+		FromMS:    fromMS,
+		ToMS:      toMS,
+		Limit:     limit,
+		Cursor:    cursor,
+	}
+	if err := protocol.ValidateBillingRequest(candidate); err != nil {
+		return result, err
+	}
+	canonical, err := EncodeBillingRequestDocument(candidate)
+	if err != nil {
+		return result, err
+	}
+	if !bytes.Equal(canonical, document) {
+		return result, fmt.Errorf("%w: billing request is not deterministic CBOR", protocol.ErrNonCanonicalCBOR)
 	}
 	return candidate, nil
 }
@@ -409,6 +492,189 @@ func DecodeActionResultDocument(document []byte) (protocol.ActionResult, error) 
 	return candidate, nil
 }
 
+// EncodeBillingResponseDocument 编码 BillingResponse 文档
+// [request_id, success, currency, network, records, next_cursor, error_code]。
+func EncodeBillingResponseDocument(response protocol.BillingResponse) ([]byte, error) {
+	if err := protocol.ValidateBillingResponse(response); err != nil {
+		return nil, err
+	}
+	currencyBytes := []byte(response.Currency)
+	networkBytes := []byte(response.Network)
+	cursorBytes := []byte(response.NextCursor)
+	errorCodeBytes := []byte(response.ErrorCode)
+	encoded := make([]byte, 0, protocol.RequestIDBytes+len(currencyBytes)+len(networkBytes)+len(cursorBytes)+len(errorCodeBytes)+64)
+	encoded = append(encoded, encodeHead(4, 7)...)
+	encoded = append(encoded, encodeHead(2, protocol.RequestIDBytes)...)
+	encoded = append(encoded, response.RequestID[:]...)
+	if response.Success {
+		encoded = append(encoded, 0xf5)
+	} else {
+		encoded = append(encoded, 0xf4)
+	}
+	encoded = append(encoded, encodeHead(3, uint64(len(currencyBytes)))...)
+	encoded = append(encoded, currencyBytes...)
+	encoded = append(encoded, encodeHead(3, uint64(len(networkBytes)))...)
+	encoded = append(encoded, networkBytes...)
+	encoded = append(encoded, encodeHead(4, uint64(len(response.Records)))...)
+	for _, record := range response.Records {
+		recordBytes, err := encodeChargeRecord(record)
+		if err != nil {
+			return nil, err
+		}
+		encoded = append(encoded, recordBytes...)
+	}
+	encoded = append(encoded, encodeHead(3, uint64(len(cursorBytes)))...)
+	encoded = append(encoded, cursorBytes...)
+	encoded = append(encoded, encodeHead(3, uint64(len(errorCodeBytes)))...)
+	encoded = append(encoded, errorCodeBytes...)
+	if len(encoded) > protocol.MaxDocumentBytes {
+		return nil, fmt.Errorf("%w: document exceeds the configured limit", protocol.ErrMessageTooLarge)
+	}
+	return encoded, nil
+}
+
+// DecodeBillingResponseDocument 严格解析 BillingResponse 文档并校验字段组合。
+func DecodeBillingResponseDocument(document []byte) (protocol.BillingResponse, error) {
+	var result protocol.BillingResponse
+	decoder := newDecoder(document)
+	if err := decoder.readArrayExact(7); err != nil {
+		return result, err
+	}
+	requestID, err := decoder.readFixedRequestID()
+	if err != nil {
+		return result, err
+	}
+	success, err := decoder.readBool()
+	if err != nil {
+		return result, err
+	}
+	currency, err := decoder.readTextAllowEmpty(protocol.MaxBillingTextBytes, protocol.ErrInvalidWire)
+	if err != nil {
+		return result, err
+	}
+	network, err := decoder.readTextAllowEmpty(protocol.MaxBillingTextBytes, protocol.ErrInvalidWire)
+	if err != nil {
+		return result, err
+	}
+	recordCount, err := decoder.readArrayCount(protocol.MaxBillingRecords, protocol.ErrInvalidWire)
+	if err != nil {
+		return result, err
+	}
+	records := make([]protocol.ChargeRecord, 0, recordCount)
+	for index := 0; index < recordCount; index++ {
+		record, recordErr := decodeChargeRecord(decoder)
+		if recordErr != nil {
+			return result, fmt.Errorf("%w: billing record %d: %v", protocol.ErrInvalidWire, index, recordErr)
+		}
+		records = append(records, record)
+	}
+	nextCursor, err := decoder.readTextAllowEmpty(protocol.MaxBillingCursorBytes, protocol.ErrInvalidWire)
+	if err != nil {
+		return result, err
+	}
+	errorCode, err := decoder.readTextAllowEmpty(protocol.MaxBillingTextBytes, protocol.ErrInvalidWire)
+	if err != nil {
+		return result, err
+	}
+	if !decoder.atEnd() {
+		return result, fmt.Errorf("%w: trailing bytes in billing response", protocol.ErrInvalidWire)
+	}
+	candidate := protocol.BillingResponse{
+		RequestID:  requestID,
+		Success:    success,
+		Currency:   currency,
+		Network:    network,
+		Records:    records,
+		NextCursor: nextCursor,
+		ErrorCode:  errorCode,
+	}
+	if err := protocol.ValidateBillingResponse(candidate); err != nil {
+		return result, err
+	}
+	canonical, err := EncodeBillingResponseDocument(candidate)
+	if err != nil {
+		return result, err
+	}
+	if !bytes.Equal(canonical, document) {
+		return result, fmt.Errorf("%w: billing response is not deterministic CBOR", protocol.ErrNonCanonicalCBOR)
+	}
+	candidate.Records = append([]protocol.ChargeRecord(nil), records...)
+	return candidate, nil
+}
+
+func encodeChargeRecord(record protocol.ChargeRecord) ([]byte, error) {
+	if err := protocol.ValidateChargeRecord(record); err != nil {
+		return nil, err
+	}
+	chargeIDBytes := []byte(record.ChargeID)
+	actionBytes := []byte(record.Action)
+	channelBytes := []byte(record.Channel)
+	amountBytes := []byte(record.ChargedAmount.String())
+	encoded := make([]byte, 0, protocol.RequestIDBytes+len(chargeIDBytes)+len(actionBytes)+len(channelBytes)+len(amountBytes)+48)
+	encoded = append(encoded, encodeHead(4, 6)...)
+	encoded = append(encoded, encodeHead(3, uint64(len(chargeIDBytes)))...)
+	encoded = append(encoded, chargeIDBytes...)
+	encoded = append(encoded, encodeHead(0, record.OccurredAtMS)...)
+	encoded = append(encoded, encodeHead(3, uint64(len(actionBytes)))...)
+	encoded = append(encoded, actionBytes...)
+	encoded = append(encoded, encodeHead(3, uint64(len(channelBytes)))...)
+	encoded = append(encoded, channelBytes...)
+	encoded = append(encoded, encodeHead(2, protocol.RequestIDBytes)...)
+	encoded = append(encoded, record.SourceRequestID[:]...)
+	encoded = append(encoded, encodeHead(3, uint64(len(amountBytes)))...)
+	encoded = append(encoded, amountBytes...)
+	return encoded, nil
+}
+
+func decodeChargeRecord(decoder *decoder) (protocol.ChargeRecord, error) {
+	if err := decoder.readArrayExact(6); err != nil {
+		return protocol.ChargeRecord{}, err
+	}
+	chargeID, err := decoder.readText(protocol.MaxBillingTextBytes, protocol.ErrInvalidWire)
+	if err != nil {
+		return protocol.ChargeRecord{}, err
+	}
+	occurredAtMS, err := decoder.readUint()
+	if err != nil {
+		return protocol.ChargeRecord{}, err
+	}
+	action, err := decoder.readText(protocol.MaxBillingTextBytes, protocol.ErrInvalidWire)
+	if err != nil {
+		return protocol.ChargeRecord{}, err
+	}
+	channel, err := decoder.readText(protocol.MaxChannelUTF8Bytes, protocol.ErrInvalidWire)
+	if err != nil {
+		return protocol.ChargeRecord{}, err
+	}
+	if err := protocol.ValidateChannel(channel, true); err != nil {
+		return protocol.ChargeRecord{}, err
+	}
+	sourceRequestID, err := decoder.readFixedRequestID()
+	if err != nil {
+		return protocol.ChargeRecord{}, err
+	}
+	amountText, err := decoder.readText(protocol.MaxAmountBytes, protocol.ErrInvalidWire)
+	if err != nil {
+		return protocol.ChargeRecord{}, err
+	}
+	amount, err := protocol.NewAmount(amountText)
+	if err != nil {
+		return protocol.ChargeRecord{}, err
+	}
+	record := protocol.ChargeRecord{
+		ChargeID:        chargeID,
+		OccurredAtMS:    occurredAtMS,
+		Action:          action,
+		Channel:         channel,
+		SourceRequestID: sourceRequestID,
+		ChargedAmount:   amount,
+	}
+	if err := protocol.ValidateChargeRecord(record); err != nil {
+		return protocol.ChargeRecord{}, err
+	}
+	return record, nil
+}
+
 func parseOuter(input []byte) (Message, error) {
 	var result Message
 	if len(input) > protocol.MaxWireBytes {
@@ -534,6 +800,12 @@ func validateDocument(kind protocol.Kind, document []byte) error {
 	case protocol.ActionResultKind:
 		_, err := DecodeActionResultDocument(document)
 		return err
+	case protocol.BillingRequestKind:
+		_, err := DecodeBillingRequestDocument(document)
+		return err
+	case protocol.BillingResponseKind:
+		_, err := DecodeBillingResponseDocument(document)
+		return err
 	default:
 		return fmt.Errorf("%w: kind is not defined by SSP V1", protocol.ErrUnsupportedKind)
 	}
@@ -541,7 +813,7 @@ func validateDocument(kind protocol.Kind, document []byte) error {
 
 func isRequestKind(kind protocol.Kind) bool {
 	switch kind {
-	case protocol.PublishKind, protocol.SubscribeKind, protocol.UnsubscribeKind, protocol.SubscriptionsRequestKind:
+	case protocol.PublishKind, protocol.SubscribeKind, protocol.UnsubscribeKind, protocol.SubscriptionsRequestKind, protocol.BillingRequestKind:
 		return true
 	default:
 		return false

@@ -18,6 +18,7 @@ import {
   SSPError,
   Session,
   decodeActionResultDocument,
+  decodeBillingRequestDocument,
   decodePublishDocument,
   encodeActionResultDocument,
   encodePublishDocument,
@@ -25,6 +26,8 @@ import {
   encodeWire,
   matches,
   newActionResult,
+  newBillingRequest,
+  newBillingResponse,
   newAmount,
   newPublish,
   newRequestId,
@@ -35,6 +38,7 @@ import {
   normalizeSubscriptions,
   parse,
   parseActionResult,
+  parseBillingResponse,
   parsePublish,
   parseSubscriptionsResponse,
   subscribe,
@@ -105,6 +109,33 @@ test("shared Wire fixtures encode and decode byte-for-byte", async () => {
       assert.equal(response.chargedAmount, testCase.charged_amount);
       assert.deepEqual(response.channels, testCase.channels);
     }
+    if (message.kind === Kind.BillingRequest) {
+      const request = decodeBillingRequestDocument(message.document);
+      assert.equal(toHex(request.requestId), testCase.request_id_hex);
+      assert.equal(request.fromMs, BigInt(testCase.from_ms));
+      assert.equal(request.toMs, BigInt(testCase.to_ms));
+      assert.equal(request.limit, testCase.limit);
+      assert.equal(request.cursor, testCase.cursor);
+    }
+    if (message.kind === Kind.BillingResponse) {
+      const response = parseBillingResponse(wire);
+      assert.equal(toHex(response.requestId), testCase.request_id_hex);
+      assert.equal(response.success, testCase.success);
+      assert.equal(response.currency, testCase.currency);
+      assert.equal(response.network, testCase.network);
+      assert.equal(response.nextCursor, testCase.next_cursor);
+      assert.equal(response.errorCode, testCase.error_code);
+      assert.equal(response.records.length, testCase.records.length);
+      response.records.forEach((record, index) => {
+        const expected = testCase.records[index];
+        assert.equal(record.chargeId, expected.charge_id);
+        assert.equal(record.occurredAtMs, BigInt(expected.occurred_at_ms));
+        assert.equal(record.action, expected.action);
+        assert.equal(record.channel, expected.channel);
+        assert.equal(toHex(record.sourceRequestId), expected.source_request_id_hex);
+        assert.equal(record.chargedAmount, expected.charged_amount);
+      });
+    }
     if (message.kind === Kind.ActionResult) {
       const result = parseActionResult(wire);
       assert.equal(toHex(result.requestId), testCase.request_id_hex);
@@ -114,7 +145,7 @@ test("shared Wire fixtures encode and decode byte-for-byte", async () => {
     }
     assert.equal(requestId.byteLength, 32);
   }
-  assert.deepEqual([...seenKinds].sort((left, right) => left - right), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual([...seenKinds].sort((left, right) => left - right), [1, 2, 3, 4, 5, 6, 7, 8]);
 });
 
 test("shared invalid fixtures return the same stable error codes", async () => {
@@ -248,6 +279,57 @@ test("service returns ActionResult for every successful request and preserves Pu
   const unsubscribeId = id(8);
   const unsubscribeResult = await session.handleMessage(newUnsubscribe(unsubscribeId, "news"));
   assert.equal(parseActionResult(unsubscribeResult.response).success, true);
+});
+
+test("service handles BillingRequest pages and fixed failure fields", async () => {
+  const key = publicKey(6);
+  const sourceRequestId = id(44);
+  const backend = {
+    subscribe() { return "0"; },
+    unsubscribe() { return "0"; },
+    subscriptions() { return { channels: [], chargedAmount: "0" }; },
+    listChargeRecords(receivedKey, request) {
+      assert.deepEqual(Array.from(receivedKey), Array.from(key));
+      assert.equal(request.fromMs, 1_700_000_000_000n);
+      assert.equal(request.toMs, 1_700_000_001_000n);
+      assert.equal(request.limit, 10);
+      assert.equal(request.cursor, "");
+      return {
+        currency: "BSV",
+        network: "testnet",
+        records: [{
+          chargeId: "operation-1",
+          occurredAtMs: 1_700_000_000_123n,
+          action: "publish",
+          channel: "news",
+          sourceRequestId,
+          chargedAmount: "0.001",
+        }],
+        nextCursor: "cursor-2",
+      };
+    },
+  };
+  const session = new Session(key, backend, new RecordingDispatcher());
+  const result = await session.handleMessage(newBillingRequest(id(43), 1_700_000_000_000n, 1_700_000_001_000n, 10, ""));
+  const response = parseBillingResponse(result.response);
+  assert.equal(response.success, true);
+  assert.equal(response.currency, "BSV");
+  assert.equal(response.network, "testnet");
+  assert.equal(response.nextCursor, "cursor-2");
+  assert.equal(response.records[0].sourceRequestId[0], 44);
+  assert.equal(response.records[0].chargedAmount, "0.001");
+
+  const rejectedSession = new Session(key, {
+    subscribe() { return "0"; },
+    unsubscribe() { return "0"; },
+    subscriptions() { return { channels: [], chargedAmount: "0" }; },
+    listChargeRecords() { throw Object.assign(new Error("余额不足"), { code: ActionErrorCode.REJECTED }); },
+  }, new RecordingDispatcher());
+  const rejected = await rejectedSession.handleMessage(newBillingRequest(id(45), 0n, 1n, 1, ""));
+  const rejectedResponse = parseBillingResponse(rejected.response);
+  assert.equal(rejectedResponse.success, false);
+  assert.equal(rejectedResponse.errorCode, ActionErrorCode.REJECTED);
+  assert.deepEqual(rejectedResponse.records, []);
 });
 
 test("Session suppresses concurrent duplicate IDs and permits distinct IDs", async () => {

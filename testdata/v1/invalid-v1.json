@@ -8,7 +8,7 @@
     },
     {
       "name": "unknown-kind",
-      "wire_hex": "8301074180",
+      "wire_hex": "8301094180",
       "expected_code": "UNSUPPORTED_KIND"
     },
     {

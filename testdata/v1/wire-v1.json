@@ -110,6 +110,76 @@
       "charged_amount": "0",
       "error_code": "REJECTED",
       "wire_hex": "830106582f845820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1ff461306852454a4543544544"
+    },
+    {
+      "name": "billing-request-first-page",
+      "kind": 7,
+      "kind_name": "BillingRequest",
+      "request_id_hex": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "from_ms": 0,
+      "to_ms": 1700000000000,
+      "limit": 2,
+      "cursor": "",
+      "wire_hex": "830107582f8558200a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a001b0000018bcfe568000260"
+    },
+    {
+      "name": "billing-request-next-page",
+      "kind": 7,
+      "kind_name": "BillingRequest",
+      "request_id_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "from_ms": 1700000000000,
+      "to_ms": 1700003600000,
+      "limit": 100,
+      "cursor": "opaque-1",
+      "wire_hex": "83010758408558200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b1b0000018bcfe568001b0000018bd01c56801864686f70617175652d31"
+    },
+    {
+      "name": "billing-response-success-record",
+      "kind": 8,
+      "kind_name": "BillingResponse",
+      "request_id_hex": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "success": true,
+      "currency": "BSV",
+      "network": "mainnet",
+      "records": [
+        {
+          "charge_id": "op-001",
+          "occurred_at_ms": 1700000000123,
+          "action": "publish",
+          "channel": "news",
+          "source_request_id_hex": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+          "charged_amount": "0.001"
+        }
+      ],
+      "next_cursor": "next-1",
+      "error_code": "",
+      "wire_hex": "830108587f8758200a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0af563425356676d61696e6e65748186666f702d3030311b0000018bcfe5687b677075626c697368646e65777358200c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c65302e303031666e6578742d3160"
+    },
+    {
+      "name": "billing-response-empty",
+      "kind": 8,
+      "kind_name": "BillingResponse",
+      "request_id_hex": "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+      "success": true,
+      "currency": "BSV",
+      "network": "mainnet",
+      "records": [],
+      "next_cursor": "",
+      "error_code": "",
+      "wire_hex": "83010858338758200e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0ef563425356676d61696e6e6574806060"
+    },
+    {
+      "name": "billing-response-failure",
+      "kind": 8,
+      "kind_name": "BillingResponse",
+      "request_id_hex": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+      "success": false,
+      "currency": "",
+      "network": "",
+      "records": [],
+      "next_cursor": "",
+      "error_code": "INTERNAL_ERROR",
+      "wire_hex": "83010858378758200d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0df4606080606e494e5445524e414c5f4552524f52"
     }
   ]
 }

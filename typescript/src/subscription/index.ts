@@ -4,9 +4,12 @@ import {
   ErrorCode,
   MAX_SUBSCRIPTIONS,
   Amount,
+	BillingPage,
+	BillingRequest,
   PublicKey,
   RequestId,
   SSPError,
+	validateBillingRequest,
   validateChannel,
   validatePublicKey,
 } from "../protocol/index.js";
@@ -38,6 +41,11 @@ export interface Backend {
     remotePublicKey: PublicKey,
     requestId: RequestId,
   ): SubscriptionQueryResult | Promise<SubscriptionQueryResult>;
+	/** 查询已认证身份自己的账单分页；免费和失败操作不应返回为 records。 */
+	listChargeRecords(
+		remotePublicKey: PublicKey,
+		request: BillingRequest,
+	): BillingPage | Promise<BillingPage>;
 }
 
 /** 校验并复制订阅集合，返回唯一的 UTF-8 字节升序表示。 */
@@ -126,6 +134,13 @@ export class MemoryBackend implements Backend {
     const key = keyString(remotePublicKey);
     return { channels: normalizeSubscriptions(this.states.get(key) ?? []), chargedAmount: "0" };
   }
+
+	/** 返回空的进程内账单页；真实账单必须由生产 Backend 持久化提供。 */
+	listChargeRecords(remotePublicKey: PublicKey, request: BillingRequest): BillingPage {
+		keyString(remotePublicKey);
+		validateBillingRequest(request);
+		return { currency: "BSV", network: "mainnet", records: [], nextCursor: "" };
+	}
 }
 
 function keyString(remotePublicKey: PublicKey): string {

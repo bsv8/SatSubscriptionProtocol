@@ -90,7 +90,7 @@ CP；生产程序在现有具体 Dispatcher 中组合两个库。
 
 ## 7. 版本
 
-- 项目包/SDK 版本：`0.2.0`；
+- 项目包/SDK 版本：`0.3.0`；
 - SSP WireVersion：仍为 `1`；
 - SSP Kind 数值：不变；
 - CP protocol 和 envelope 版本：不变；

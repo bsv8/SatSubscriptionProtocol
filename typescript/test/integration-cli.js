@@ -13,6 +13,8 @@ import {
   encodeWire,
   newPublish,
   newActionResult,
+  newBillingRequest,
+  newBillingResponse,
   newSubscriptionsResponse,
   newSubscribe,
   newSubscriptionsRequest,
@@ -20,6 +22,7 @@ import {
   normalizeSubscriptions,
   parse,
   parseActionResult,
+  parseBillingResponse,
   parseSubscriptionsResponse,
   matches,
   subscribe,
@@ -69,6 +72,9 @@ async function run() {
     case "billing":
       value = await billingExchange();
       break;
+    case "billing-query":
+      value = await billingQueryExchange();
+      break;
     default:
       throw new Error(`unknown mode ${mode}`);
   }
@@ -92,6 +98,15 @@ async function encodeFixtures() {
       case Kind.SubscriptionsRequest:
         wire = newSubscriptionsRequest(fromHex(item.request_id_hex));
         break;
+      case Kind.BillingRequest:
+        wire = newBillingRequest(
+          fromHex(item.request_id_hex),
+          BigInt(item.from_ms),
+          BigInt(item.to_ms),
+          item.limit,
+          item.cursor,
+        );
+        break;
       case Kind.SubscriptionsResponse:
         wire = newSubscriptionsResponse({
           requestId: fromHex(item.request_id_hex),
@@ -104,6 +119,24 @@ async function encodeFixtures() {
           requestId: fromHex(item.request_id_hex),
           success: item.success,
           chargedAmount: item.charged_amount,
+          errorCode: item.error_code,
+        });
+        break;
+      case Kind.BillingResponse:
+        wire = newBillingResponse({
+          requestId: fromHex(item.request_id_hex),
+          success: item.success,
+          currency: item.currency,
+          network: item.network,
+          records: item.records.map((record) => ({
+            chargeId: record.charge_id,
+            occurredAtMs: BigInt(record.occurred_at_ms),
+            action: record.action,
+            channel: record.channel,
+            sourceRequestId: fromHex(record.source_request_id_hex),
+            chargedAmount: record.charged_amount,
+          })),
+          nextCursor: item.next_cursor,
           errorCode: item.error_code,
         });
         break;
@@ -213,6 +246,83 @@ async function billingExchange() {
   } finally {
     session.close();
   }
+}
+
+async function billingQueryExchange() {
+  const fixture = await readFixture("billing-query-v1.json");
+  const key = fromHex(fixture.payer_id_hex);
+  const backend = {
+    subscribe() { return "0"; },
+    unsubscribe() { return "0"; },
+    subscriptions() { return { channels: [], chargedAmount: "0" }; },
+    listChargeRecords(_remotePublicKey, request) {
+      if (request.cursor === "reject") {
+        throw Object.assign(new Error("余额不足"), { code: ActionErrorCode.REJECTED });
+      }
+      if (request.cursor === "cursor-2") {
+        return { currency: "BSV", network: "testnet", records: [], nextCursor: "" };
+      }
+      return {
+        currency: "BSV",
+        network: "testnet",
+        records: [{
+          chargeId: "operation-1",
+          occurredAtMs: 1_700_000_000_123n,
+          action: "publish",
+          channel: "news",
+          sourceRequestId: fromHex("4a".repeat(32)),
+          chargedAmount: "0.001",
+        }],
+        nextCursor: "cursor-2",
+      };
+    },
+  };
+  const session = new Session(key, backend, new RecordingDispatcher());
+  try {
+    const result = [];
+    for (const item of fixture.cases) {
+      const requestWire = newBillingRequest(
+        fromHex(item.request_id_hex),
+        BigInt(item.from_ms),
+        BigInt(item.to_ms),
+        item.limit,
+        item.cursor,
+      );
+      const handled = await session.handleMessage(requestWire);
+      if (!handled.response) {
+        throw new Error(`billing query ${item.name} returned no response`);
+      }
+      const response = parseBillingResponse(handled.response);
+      validateBillingQueryResponse(item, response);
+      result.push({ name: item.name, response_hex: toHex(handled.response) });
+    }
+    return result;
+  } finally {
+    session.close();
+  }
+}
+
+function validateBillingQueryResponse(item, response) {
+  if (toHex(response.requestId) !== item.request_id_hex
+    || response.success !== item.expected_success
+    || response.currency !== item.expected_currency
+    || response.network !== item.expected_network
+    || response.nextCursor !== item.expected_next_cursor
+    || response.errorCode !== item.expected_error_code
+    || response.records.length !== item.expected_records.length) {
+    throw new Error(`billing query response ${item.name} does not match expected fields`);
+  }
+  response.records.forEach((record, index) => {
+    const expected = item.expected_records[index];
+    if (record.chargeId !== expected.charge_id
+      || record.occurredAtMs !== BigInt(expected.occurred_at_ms)
+      || record.action !== expected.action
+      || record.channel !== expected.channel
+      || toHex(record.sourceRequestId) !== expected.source_request_id_hex
+      || record.chargedAmount !== expected.charged_amount) {
+      throw new Error(`billing query response ${item.name} record ${index} does not match`);
+    }
+  });
 }
 
 function billingRequest(item) {

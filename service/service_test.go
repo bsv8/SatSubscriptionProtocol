@@ -409,6 +409,61 @@ func TestSessionReturnsActualChargedAmounts(t *testing.T) {
 	}
 }
 
+func TestSessionHandlesBillingRequestAndKeepsOuterIdentity(t *testing.T) {
+	key := fixedKey()
+	sourceRequestID := requestID(44)
+	backend := &billingQueryBackend{page: protocol.BillingPage{
+		Currency: "BSV",
+		Network:  "testnet",
+		Records: []protocol.ChargeRecord{{
+			ChargeID:        "operation-1",
+			OccurredAtMS:    1_700_000_000_123,
+			Action:          "publish",
+			Channel:         "news",
+			SourceRequestID: sourceRequestID,
+			ChargedAmount:   protocol.Amount("0.001"),
+		}},
+		NextCursor: "cursor-2",
+	}}
+	session := service.NewSession(key, backend, service.NewRecordingDispatcher())
+	requestIDValue := requestID(43)
+	requestWire, err := client.NewBillingRequest(requestIDValue, 1_700_000_000_000, 1_700_000_001_000, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, handleErr := session.HandleMessage(context.Background(), requestWire)
+	if handleErr != nil || !result.HasResponse || result.Suppressed {
+		t.Fatalf("BillingRequest result = %#v, %v", result, handleErr)
+	}
+	response, err := client.ParseBillingResponse(result.Response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.RequestID != requestIDValue || !response.Success || response.Currency != "BSV" || response.Network != "testnet" || response.NextCursor != "cursor-2" || len(response.Records) != 1 {
+		t.Fatalf("BillingResponse = %#v", response)
+	}
+	if response.Records[0].SourceRequestID != sourceRequestID || response.Records[0].ChargedAmount != protocol.Amount("0.001") {
+		t.Fatalf("BillingResponse record = %#v", response.Records[0])
+	}
+	if backend.key != key || backend.request != (protocol.BillingRequest{RequestID: requestIDValue, FromMS: 1_700_000_000_000, ToMS: 1_700_000_001_000, Limit: 10, Cursor: ""}) {
+		t.Fatalf("Backend received key/request = %v/%#v", backend.key, backend.request)
+	}
+
+	rejected := service.NewSession(key, &billingQueryBackend{err: protocol.ErrRejected}, service.NewRecordingDispatcher())
+	rejectedWire, err := client.NewBillingRequest(requestID(45), 0, 1, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectedResult, handleErr := rejected.HandleMessage(context.Background(), rejectedWire)
+	if handleErr != nil || !rejectedResult.HasResponse {
+		t.Fatalf("rejected BillingRequest = %#v, %v", rejectedResult, handleErr)
+	}
+	rejectedResponse, err := client.ParseBillingResponse(rejectedResult.Response)
+	if err != nil || rejectedResponse.Success || rejectedResponse.ErrorCode != protocol.ActionErrorRejected || len(rejectedResponse.Records) != 0 {
+		t.Fatalf("rejected BillingResponse = %#v, %v", rejectedResponse, err)
+	}
+}
+
 func TestSameActionWithDifferentRequestIDsChargesAgain(t *testing.T) {
 	backend := &chargeCountingBackend{}
 	session := service.NewSession(fixedKey(), backend, service.NewRecordingDispatcher())
@@ -507,6 +562,10 @@ func (backend *invalidSubscriptionsBackend) Subscriptions(context.Context, proto
 	return []string{"news", "news"}, protocol.ZeroAmount, nil
 }
 
+func (backend *invalidSubscriptionsBackend) ListChargeRecords(context.Context, protocol.PublicKey, protocol.BillingRequest) (protocol.BillingPage, error) {
+	return emptyBillingPage(), nil
+}
+
 type chargeCountingBackend struct {
 	subscribeCalls   int
 	unsubscribeCalls int
@@ -526,6 +585,10 @@ func (backend *chargeCountingBackend) Subscriptions(context.Context, protocol.Pu
 	return []string{}, protocol.ZeroAmount, nil
 }
 
+func (backend *chargeCountingBackend) ListChargeRecords(context.Context, protocol.PublicKey, protocol.BillingRequest) (protocol.BillingPage, error) {
+	return emptyBillingPage(), nil
+}
+
 func (backend *failingBackend) Subscribe(context.Context, protocol.PublicKey, protocol.RequestID, string) (protocol.Amount, error) {
 	return "", backend.err
 }
@@ -536,6 +599,10 @@ func (backend *failingBackend) Unsubscribe(context.Context, protocol.PublicKey, 
 
 func (backend *failingBackend) Subscriptions(context.Context, protocol.PublicKey, protocol.RequestID) ([]string, protocol.Amount, error) {
 	return nil, "", backend.err
+}
+
+func (backend *failingBackend) ListChargeRecords(context.Context, protocol.PublicKey, protocol.BillingRequest) (protocol.BillingPage, error) {
+	return protocol.BillingPage{}, backend.err
 }
 
 type failingDispatcher struct {
@@ -591,10 +658,42 @@ func (backend *pricedBackend) Subscriptions(context.Context, protocol.PublicKey,
 	return []string{"news"}, "0.123456789012345678", nil
 }
 
+func (backend *pricedBackend) ListChargeRecords(context.Context, protocol.PublicKey, protocol.BillingRequest) (protocol.BillingPage, error) {
+	return emptyBillingPage(), nil
+}
+
 type pricedDispatcher struct{}
 
 func (dispatcher *pricedDispatcher) Dispatch(context.Context, service.PublishEvent) (protocol.Amount, error) {
 	return "1.2", nil
+}
+
+type billingQueryBackend struct {
+	page    protocol.BillingPage
+	err     error
+	key     protocol.PublicKey
+	request protocol.BillingRequest
+}
+
+func (backend *billingQueryBackend) Subscribe(context.Context, protocol.PublicKey, protocol.RequestID, string) (protocol.Amount, error) {
+	return protocol.ZeroAmount, nil
+}
+
+func (backend *billingQueryBackend) Unsubscribe(context.Context, protocol.PublicKey, protocol.RequestID, string) (protocol.Amount, error) {
+	return protocol.ZeroAmount, nil
+}
+
+func (backend *billingQueryBackend) Subscriptions(context.Context, protocol.PublicKey, protocol.RequestID) ([]string, protocol.Amount, error) {
+	return []string{}, protocol.ZeroAmount, nil
+}
+
+func (backend *billingQueryBackend) ListChargeRecords(_ context.Context, key protocol.PublicKey, request protocol.BillingRequest) (protocol.BillingPage, error) {
+	backend.key = key
+	backend.request = request
+	if backend.err != nil {
+		return protocol.BillingPage{}, backend.err
+	}
+	return backend.page, nil
 }
 
 type barrierBackend struct {
@@ -614,6 +713,10 @@ func (backend *barrierBackend) Unsubscribe(context.Context, protocol.PublicKey, 
 
 func (backend *barrierBackend) Subscriptions(context.Context, protocol.PublicKey, protocol.RequestID) ([]string, protocol.Amount, error) {
 	return []string{}, protocol.ZeroAmount, nil
+}
+
+func (backend *barrierBackend) ListChargeRecords(context.Context, protocol.PublicKey, protocol.BillingRequest) (protocol.BillingPage, error) {
+	return emptyBillingPage(), nil
 }
 
 func (backend *countingBackend) Subscribe(ctx context.Context, key protocol.PublicKey, id protocol.RequestID, channel string) (protocol.Amount, error) {
@@ -641,10 +744,21 @@ func (backend *countingBackend) Subscriptions(ctx context.Context, key protocol.
 	return backend.delegate.Subscriptions(ctx, key, id)
 }
 
+func (backend *countingBackend) ListChargeRecords(ctx context.Context, key protocol.PublicKey, request protocol.BillingRequest) (protocol.BillingPage, error) {
+	if backend.delegate == nil {
+		backend.delegate = subscription.NewMemoryBackend()
+	}
+	return backend.delegate.ListChargeRecords(ctx, key, request)
+}
+
 func (backend *countingBackend) subscribeCalls() int {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	return backend.calls
+}
+
+func emptyBillingPage() protocol.BillingPage {
+	return protocol.BillingPage{Currency: "BSV", Network: "mainnet", Records: []protocol.ChargeRecord{}, NextCursor: ""}
 }
 
 func fixedKey() protocol.PublicKey {

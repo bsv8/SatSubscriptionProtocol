@@ -3,9 +3,9 @@
 /** SSP V1 的固定 Wire 版本。 */
 export const WIRE_VERSION = 1 as const;
 /** 与 Go SDK 对齐的发布版本。 */
-export const SDK_VERSION = "0.2.0" as const;
+export const SDK_VERSION = "0.3.0" as const;
 
-/** SSP V1 的六种固定消息类型。 */
+/** SSP V1 的八种固定消息类型。 */
 export const Kind = {
   /** Publish（发布请求或广播交付）。 */
   Publish: 1,
@@ -19,6 +19,10 @@ export const Kind = {
   SubscriptionsResponse: 5,
   /** ActionResult（返回动作成功/失败和实际扣费）。 */
   ActionResult: 6,
+  /** BillingRequest（查询当前已认证身份自己的账单）。 */
+  BillingRequest: 7,
+  /** BillingResponse（返回账单记录分页或固定错误码）。 */
+  BillingResponse: 8,
 } as const;
 
 /** SSP Wire Kind 数值类型。 */
@@ -42,6 +46,14 @@ export const MAX_AMOUNT_BYTES = 64;
 export const MAX_AMOUNT_SCALE = 18;
 /** 单个 Stream Session 可登记的最大 request_id 数量。 */
 export const MAX_REQUEST_IDS_PER_SESSION = 65_536;
+/** 一次账单查询允许请求的最大记录数。 */
+export const MAX_BILLING_LIMIT = 100;
+/** 一页账单响应允许返回的最大记录数。 */
+export const MAX_BILLING_RECORDS = 100;
+/** 账单标识、动作、货币和网络文本的 UTF-8 字节上限。 */
+export const MAX_BILLING_TEXT_BYTES = 256;
+/** 不透明分页游标的 UTF-8 字节上限。 */
+export const MAX_BILLING_CURSOR_BYTES = 256;
 
 /** 跨语言稳定的 SDK 本地错误码。 */
 export const ErrorCode = {
@@ -179,6 +191,69 @@ export interface SubscriptionsResponse {
   readonly channels: readonly string[];
 }
 
+/** BillingRequest 文档；时间字段是 Unix 毫秒，使用 bigint 避免精度损失。 */
+export interface BillingRequest {
+  /** 同一 Stream 内关联账单请求与响应的编号。 */
+  readonly requestId: RequestId;
+  /** 开始时间，包含该时刻。 */
+  readonly fromMs: bigint;
+  /** 结束时间，不包含该时刻。 */
+  readonly toMs: bigint;
+  /** 本页最多返回的记录数，范围为 1..100。 */
+  readonly limit: number;
+  /** 不透明分页游标；第一页为空字符串。 */
+  readonly cursor: string;
+}
+
+/** 一条实际发生的正扣费记录。 */
+export interface ChargeRecord {
+  /** 当前映射为 operation_id 的账单记录唯一编号。 */
+  readonly chargeId: string;
+  /** 扣费发生时间，单位为 Unix 毫秒。 */
+  readonly occurredAtMs: bigint;
+  /** 产生扣费的 SSP 动作名称。 */
+  readonly action: string;
+  /** 产生扣费的 channel；订阅相关动作允许 "*"。 */
+  readonly channel: string;
+  /** 产生扣费的 SSP 请求编号。 */
+  readonly sourceRequestId: RequestId;
+  /** 精确十进制正金额，不使用 JavaScript number。 */
+  readonly chargedAmount: Amount;
+}
+
+/** Backend 返回的一页账单数据。 */
+export interface BillingPage {
+  /** 金额货币标识，例如 BSV。 */
+  readonly currency: string;
+  /** 账单所属网络标识，例如 mainnet 或 testnet。 */
+  readonly network: string;
+  /** 实际正扣费记录，免费和失败操作不应出现。 */
+  readonly records: readonly ChargeRecord[];
+  /** 下一页不透明游标；没有下一页时为空。 */
+  readonly nextCursor: string;
+}
+
+/** ChargeRecordPage 是 BillingPage 的语义别名。 */
+export type ChargeRecordPage = BillingPage;
+
+/** BillingResponse 文档；失败时除 requestId/errorCode 外字段均为空。 */
+export interface BillingResponse {
+  /** 原样回显的账单请求编号。 */
+  readonly requestId: RequestId;
+  /** 账单查询是否成功。 */
+  readonly success: boolean;
+  /** 成功结果的金额货币标识。 */
+  readonly currency: string;
+  /** 成功结果的账单网络标识。 */
+  readonly network: string;
+  /** 成功结果的实际正扣费记录页。 */
+  readonly records: readonly ChargeRecord[];
+  /** 成功结果的下一页不透明游标。 */
+  readonly nextCursor: string;
+  /** 成功为空；失败只能是三个固定线上错误码。 */
+  readonly errorCode: "" | ActionErrorCode;
+}
+
 /** ActionResult 文档。 */
 export interface ActionResult {
   /** 原样回显的请求编号。 */
@@ -265,6 +340,72 @@ export function validateActionResult(result: ActionResult): void {
   }
   if (result.chargedAmount !== ZERO_AMOUNT || !isActionErrorCode(result.errorCode)) {
     throw new SSPError(ErrorCode.INVALID_WIRE, "失败 ActionResult 必须使用 charged_amount=0 和固定错误码");
+  }
+}
+
+/** 校验账单查询的范围、页大小和游标。 */
+export function validateBillingRequest(request: BillingRequest): void {
+  validateRequestId(request.requestId);
+  if (typeof request.fromMs !== "bigint" || typeof request.toMs !== "bigint"
+    || request.fromMs < 0n || request.toMs < 0n || request.fromMs > request.toMs) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "billing from_ms/to_ms 必须是合法的非降序 Unix 毫秒 bigint");
+  }
+  if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > MAX_BILLING_LIMIT) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, `billing limit 必须是 1..${MAX_BILLING_LIMIT} 的整数`);
+  }
+  validateBillingText(request.cursor, MAX_BILLING_CURSOR_BYTES, true, "billing cursor");
+}
+
+/** 校验账单记录字段和“只返回正扣费”的约束。 */
+export function validateChargeRecord(record: ChargeRecord): void {
+  validateBillingText(record.chargeId, MAX_BILLING_TEXT_BYTES, false, "charge_id");
+  if (typeof record.occurredAtMs !== "bigint" || record.occurredAtMs < 0n) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "occurred_at_ms 必须是 bigint");
+  }
+  validateBillingText(record.action, MAX_BILLING_TEXT_BYTES, false, "action");
+  validateChannel(record.channel, true);
+  validateRequestId(record.sourceRequestId);
+  validateAmount(record.chargedAmount);
+  if (record.chargedAmount === ZERO_AMOUNT) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "账单 charged_amount 必须是正数");
+  }
+}
+
+/** 校验 Backend 返回的成功账单页。 */
+export function validateBillingPage(page: BillingPage): void {
+  validateBillingText(page.currency, MAX_BILLING_TEXT_BYTES, false, "currency");
+  validateBillingText(page.network, MAX_BILLING_TEXT_BYTES, false, "network");
+  if (!Array.isArray(page.records) || page.records.length > MAX_BILLING_RECORDS) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "账单 records 超过一页限制或不是数组");
+  }
+  validateBillingText(page.nextCursor, MAX_BILLING_CURSOR_BYTES, true, "next_cursor");
+  page.records.forEach((record) => validateChargeRecord(record));
+}
+
+/** 校验 BillingResponse 的成功/失败字段组合。 */
+export function validateBillingResponse(response: BillingResponse): void {
+  validateRequestId(response.requestId);
+  if (response.success) {
+    if (response.errorCode !== "") {
+      throw new SSPError(ErrorCode.INVALID_WIRE, "成功 BillingResponse 的 error_code 必须为空字符串");
+    }
+    validateBillingPage({
+      currency: response.currency,
+      network: response.network,
+      records: response.records,
+      nextCursor: response.nextCursor,
+    });
+    return;
+  }
+  if (response.currency !== "" || response.network !== "" || !Array.isArray(response.records)
+    || response.records.length !== 0 || response.nextCursor !== "" || !isActionErrorCode(response.errorCode)) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, "失败 BillingResponse 必须使用空页字段和固定错误码");
+  }
+}
+
+function validateBillingText(value: string, maximum: number, allowEmpty: boolean, field: string): void {
+  if (typeof value !== "string" || (!allowEmpty && value.length === 0) || utf8ByteLength(value) > maximum) {
+    throw new SSPError(ErrorCode.INVALID_WIRE, `${field} 为空、不是合法 UTF-8 或超过长度限制`);
   }
 }
 
@@ -365,7 +506,7 @@ export function compareChannelsUtf8(left: string, right: string): number {
   return Math.sign(leftBytes.length - rightBytes.length);
 }
 
-/** 判断是否为六种固定 SSP Kind 之一。 */
+/** 判断是否为八种固定 SSP Kind 之一。 */
 export function isKind(kind: number): kind is WireKind {
-  return Number.isInteger(kind) && kind >= Kind.Publish && kind <= Kind.ActionResult;
+  return Number.isInteger(kind) && kind >= Kind.Publish && kind <= Kind.BillingResponse;
 }

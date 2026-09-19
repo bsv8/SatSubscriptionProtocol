@@ -22,9 +22,11 @@ client.NewPublish(requestID, channel, contentJSON) ([]byte, error)
 client.NewSubscribe(requestID, channel) ([]byte, error)
 client.NewUnsubscribe(requestID, channel) ([]byte, error)
 client.NewSubscriptionsRequest(requestID) ([]byte, error)
+client.NewBillingRequest(requestID, fromMS, toMS, limit, cursor) ([]byte, error)
 client.ParsePublish(wireCBOR) (protocol.Publish, error)
 client.ParseActionResult(wireCBOR) (protocol.ActionResult, error)
 client.ParseSubscriptionsResponse(wireCBOR) (protocol.SubscriptionsResponse, error)
+client.ParseBillingResponse(wireCBOR) (protocol.BillingResponse, error)
 ~~~
 
 TypeScript：
@@ -42,8 +44,14 @@ const publishWire = newPublish(
 
 对应签名为 newPublish(requestId, channel, contentJson)、newSubscribe(requestId,
 channel)、newUnsubscribe(requestId, channel)、newSubscriptionsRequest(requestId)、
-parsePublish、parseActionResult 和 parseSubscriptionsResponse。newRequestId()
+newBillingRequest(requestId, fromMs, toMs, limit, cursor)、parsePublish、parseActionResult、
+parseSubscriptionsResponse 和 parseBillingResponse。newRequestId()
 使用 Web Crypto/Node 的安全随机源，不使用 Math.random()。
+
+账单查询的 fromMs/toMs 使用 Unix 毫秒；TypeScript API 使用 bigint，Go API 使用 uint64。
+fromMs 包含、toMs 不包含，limit 范围是 1..100，第一页 cursor 传空字符串。BillingResponse
+成功时返回 currency、network、records 和 nextCursor；records 只包含实际正扣费记录，
+免费操作和失败操作不返回。
 
 content_json 必须是完整合法 JSON 的 UTF-8 字节；SDK 验证但不重排 JSON，收到的原始
 空白和字节会保留。Publish 不能使用 *；Subscribe/Unsubscribe 可以使用 *。
@@ -95,7 +103,8 @@ const [subscribeResult, publishResult] = await Promise.all([
 
 - Publish、Subscribe、Unsubscribe：解析 ActionResult；
 - SubscriptionsRequest：解析唯一 SubscriptionsResponse；
-- 所有成功响应都有实际 charged_amount，金额是字符串，不转换成浮点数；
+- BillingRequest：解析唯一 BillingResponse；
+- Publish/Subscribe/Unsubscribe/SubscriptionsResponse 成功结果都有实际 charged_amount，金额是字符串，不转换成浮点数；BillingResponse 将金额放在 records.charged_amount 中；
 - Publish 成功只表示服务端已接受、已扣费并开始广播，不代表任何订阅者已收到。
 
 上述 Publish ActionResult 只属于客户端 → Supplier 请求。生产 Dispatcher 向订阅者发送时：
@@ -139,6 +148,7 @@ type Backend interface {
     Subscribe(ctx, publicKey, requestID, channel) (chargedAmount protocol.Amount, err error)
     Unsubscribe(ctx, publicKey, requestID, channel) (chargedAmount protocol.Amount, err error)
     Subscriptions(ctx, publicKey, requestID) (channels []string, chargedAmount protocol.Amount, err error)
+    ListChargeRecords(ctx, publicKey, request protocol.BillingRequest) (page protocol.BillingPage, err error)
 }
 
 type Dispatcher interface {
@@ -147,14 +157,17 @@ type Dispatcher interface {
 ~~~
 
 TypeScript Backend 的方法是 subscribe(publicKey, requestId, channel)、
-unsubscribe(publicKey, requestId, channel)、subscriptions(publicKey, requestId)；
+unsubscribe(publicKey, requestId, channel)、subscriptions(publicKey, requestId)、
+listChargeRecords(publicKey, request)；其中 request 使用 BillingRequest，成功返回
+BillingPage；
 Dispatcher.dispatch(event) 返回实际 Amount。Backend/Dispatcher 自己保证收费与状态
 变更的原子事务，SDK 不读取价格文件和 SPI。Session 只做当前 Stream 的重复抑制；生产
 实现还必须按 `(payer_id, request_id)` 索引并保存 deterministic SSP Wire 的 SHA-256
 `request_digest`：摘要相同的跨 Stream 重试返回原结果，摘要不同映射为 `REJECTED`；不同
 付款人的相同 request_id 独立收费。
 
-业务失败仍返回失败 ActionResult：
+业务失败仍返回失败 ActionResult；BillingRequest 业务失败返回字段固定的失败
+BillingResponse：
 
 | ActionResult | 含义 |
 |---|---|
@@ -174,7 +187,7 @@ SSPError，原异常在标准 Error.cause。本地错误和 cause 不编码进 W
 | 线上字段 | 类型 | 中文含义 |
 |---|---|---|
 | wire_version | CBOR uint | SSP Wire 版本，V1 为 1 |
-| wire_kind | CBOR uint | 六种消息类型编号 |
+| wire_kind | CBOR uint | 八种消息类型编号 |
 | request_id | CBOR bstr，32 字节 | 同一 Stream 内关联请求与响应 |
 | channel | CBOR tstr | 精确匹配的 channel；* 表示全频道操作 |
 | content_json | CBOR bstr | 完整合法 JSON 的原始 UTF-8 字节 |
@@ -182,4 +195,16 @@ SSPError，原异常在标准 Error.cause。本地错误和 cause 不编码进 W
 | success | CBOR bool | ActionResult 动作是否成功 |
 | error_code | CBOR tstr | INVALID_REQUEST/REJECTED/INTERNAL_ERROR |
 | channels | CBOR tstr 数组 | 无重复、按 UTF-8 字节升序的订阅集合 |
+| from_ms | CBOR uint | 账单开始时间，Unix 毫秒，包含 |
+| to_ms | CBOR uint | 账单结束时间，Unix 毫秒，不包含 |
+| limit | CBOR uint | 账单单页数量，1..100 |
+| cursor | CBOR tstr | 不透明分页游标，第一页为空 |
+| currency | CBOR tstr | 成功账单页的货币标识 |
+| network | CBOR tstr | 成功账单页的网络标识 |
+| records | CBOR array | 实际正扣费记录列表 |
+| next_cursor | CBOR tstr | 下一页游标；没有下一页时为空 |
+| charge_id | CBOR tstr | 账单记录编号，当前映射 operation_id |
+| occurred_at_ms | CBOR uint | 扣费发生时间，Unix 毫秒 |
+| action | CBOR tstr | 产生扣费的 SSP 动作 |
+| source_request_id | CBOR bstr，32 字节 | 产生扣费的 SSP 请求编号 |
 | remote_public_key | 外层认证输入 | 订阅状态所属身份，不进入 SSP Wire |

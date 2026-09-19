@@ -20,16 +20,33 @@ type wireFixture struct {
 }
 
 type wireCase struct {
-	Name           string   `json:"name"`
-	Kind           uint64   `json:"kind"`
-	RequestIDHex   string   `json:"request_id_hex"`
-	Channel        string   `json:"channel"`
-	ContentJSONHex string   `json:"content_json_hex"`
-	ChargedAmount  string   `json:"charged_amount"`
-	Channels       []string `json:"channels"`
-	Success        bool     `json:"success"`
-	ErrorCode      string   `json:"error_code"`
-	WireHex        string   `json:"wire_hex"`
+	Name           string             `json:"name"`
+	Kind           uint64             `json:"kind"`
+	RequestIDHex   string             `json:"request_id_hex"`
+	Channel        string             `json:"channel"`
+	ContentJSONHex string             `json:"content_json_hex"`
+	ChargedAmount  string             `json:"charged_amount"`
+	Channels       []string           `json:"channels"`
+	Success        bool               `json:"success"`
+	ErrorCode      string             `json:"error_code"`
+	FromMS         uint64             `json:"from_ms"`
+	ToMS           uint64             `json:"to_ms"`
+	Limit          uint64             `json:"limit"`
+	Cursor         string             `json:"cursor"`
+	Currency       string             `json:"currency"`
+	Network        string             `json:"network"`
+	Records        []chargeRecordCase `json:"records"`
+	NextCursor     string             `json:"next_cursor"`
+	WireHex        string             `json:"wire_hex"`
+}
+
+type chargeRecordCase struct {
+	ChargeID           string `json:"charge_id"`
+	OccurredAtMS       uint64 `json:"occurred_at_ms"`
+	Action             string `json:"action"`
+	Channel            string `json:"channel"`
+	SourceRequestIDHex string `json:"source_request_id_hex"`
+	ChargedAmount      string `json:"charged_amount"`
 }
 
 type invalidFixture struct {
@@ -114,6 +131,11 @@ func TestWireFixturesRoundTrip(t *testing.T) {
 				if decodeErr != nil || request.RequestID != mustRequestID(t, requestID) {
 					t.Fatalf("SubscriptionsRequest fields = %#v, err=%v", request, decodeErr)
 				}
+			case protocol.BillingRequestKind:
+				request, decodeErr := wire.DecodeBillingRequestDocument(message.Document)
+				if decodeErr != nil || request.RequestID != mustRequestID(t, requestID) || request.FromMS != testCase.FromMS || request.ToMS != testCase.ToMS || request.Limit != testCase.Limit || request.Cursor != testCase.Cursor {
+					t.Fatalf("BillingRequest fields = %#v, err=%v", request, decodeErr)
+				}
 			case protocol.SubscriptionsResponseKind:
 				response, decodeErr := client.ParseSubscriptionsResponse(input)
 				if decodeErr != nil {
@@ -130,6 +152,20 @@ func TestWireFixturesRoundTrip(t *testing.T) {
 				if result.RequestID != mustRequestID(t, requestID) || result.Success != testCase.Success || result.ChargedAmount.String() != testCase.ChargedAmount || result.ErrorCode != testCase.ErrorCode {
 					t.Fatalf("ActionResult = %#v", result)
 				}
+			case protocol.BillingResponseKind:
+				response, decodeErr := client.ParseBillingResponse(input)
+				if decodeErr != nil {
+					t.Fatal(decodeErr)
+				}
+				if response.RequestID != mustRequestID(t, requestID) || response.Success != testCase.Success || response.Currency != testCase.Currency || response.Network != testCase.Network || response.NextCursor != testCase.NextCursor || response.ErrorCode != testCase.ErrorCode || len(response.Records) != len(testCase.Records) {
+					t.Fatalf("BillingResponse = %#v", response)
+				}
+				for index, record := range response.Records {
+					want := testCase.Records[index]
+					if record.ChargeID != want.ChargeID || record.OccurredAtMS != want.OccurredAtMS || record.Action != want.Action || record.Channel != want.Channel || record.SourceRequestID != mustRequestID(t, mustHex(want.SourceRequestIDHex)) || record.ChargedAmount.String() != want.ChargedAmount {
+						t.Fatalf("BillingResponse record[%d] = %#v", index, record)
+					}
+				}
 			}
 		})
 	}
@@ -140,6 +176,8 @@ func TestWireFixturesRoundTrip(t *testing.T) {
 		protocol.SubscriptionsRequestKind,
 		protocol.SubscriptionsResponseKind,
 		protocol.ActionResultKind,
+		protocol.BillingRequestKind,
+		protocol.BillingResponseKind,
 	} {
 		if !seenKinds[kind] {
 			t.Errorf("fixture does not cover kind %d", kind)
@@ -254,6 +292,14 @@ func bytesOf(value byte) []byte {
 	result := make([]byte, protocol.RequestIDBytes)
 	for index := range result {
 		result[index] = value
+	}
+	return result
+}
+
+func mustHex(value string) []byte {
+	result, err := hex.DecodeString(value)
+	if err != nil {
+		panic(err)
 	}
 	return result
 }
