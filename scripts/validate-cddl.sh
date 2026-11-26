@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ ! -d "$repo_dir/typescript/node_modules/cddl" ]]; then
-	echo "缺少 CDDL 校验器，请先执行 cd typescript && npm ci" >&2
+	echo "缺少 CDDL 校验器，请先执行 cd typescript && pnpm install --frozen-lockfile" >&2
 	exit 1
 fi
 

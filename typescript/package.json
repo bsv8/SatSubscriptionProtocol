@@ -1,5 +1,6 @@
 {
   "name": "sat-subscription-protocol",
+  "packageManager": "pnpm@11.5.1",
   "version": "0.3.0",
   "description": "SSP V1 no-network subscription broadcast SDK（无网络订阅广播 SDK）",
   "license": "AGPL-3.0-only",
@@ -41,8 +42,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "validate:cddl": "node scripts/validate-cddl.mjs ../spec/v1/ssp.cddl",
-    "test": "npm run validate:cddl && npm run build && node --test test/*.test.js",
-    "prepublishOnly": "npm run validate:cddl && npm run build"
+    "test": "pnpm run validate:cddl && pnpm run build && node --test test/*.test.js",
+    "prepublishOnly": "pnpm run validate:cddl && pnpm run build"
   },
   "devDependencies": {
     "cddl": "^0.21.1",

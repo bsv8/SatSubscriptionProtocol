@@ -28,10 +28,10 @@ compare_json_files() {
 }
 
 if [[ ! -x "$repo_dir/typescript/node_modules/.bin/tsc" || ! -x "$repo_dir/typescript/node_modules/.bin/cddl" ]]; then
-  (cd "$repo_dir/typescript" && npm ci --ignore-scripts)
+  (cd "$repo_dir/typescript" && pnpm install --frozen-lockfile --ignore-scripts)
 fi
 (cd "$repo_dir" && ./scripts/validate-cddl.sh)
-(cd "$repo_dir/typescript" && npm run build)
+(cd "$repo_dir/typescript" && pnpm run build)
 
 go_encode="$tmp_dir/go-encode.json"
 ts_encode="$tmp_dir/ts-encode.json"

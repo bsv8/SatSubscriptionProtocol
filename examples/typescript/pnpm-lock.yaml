@@ -1,0 +1,23 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      sat-subscription-protocol:
+        specifier: file:../../typescript
+        version: file:../../typescript
+
+packages:
+
+  sat-subscription-protocol@file:../../typescript:
+    resolution: {directory: ../../typescript, type: directory}
+    engines: {node: '>=18'}
+
+snapshots:
+
+  sat-subscription-protocol@file:../../typescript: {}

@@ -29,8 +29,8 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ ! -x "$repo_dir/typescript/node_modules/.bin/tsc" ]]; then
-  (cd "$repo_dir/typescript" && npm ci --ignore-scripts)
+  (cd "$repo_dir/typescript" && pnpm install --frozen-lockfile --ignore-scripts)
 fi
-(cd "$repo_dir/typescript" && npm run build)
-(cd "$example_dir" && npm ci --ignore-scripts && npm start)
+(cd "$repo_dir/typescript" && pnpm run build)
+(cd "$example_dir" && pnpm install --frozen-lockfile --ignore-scripts && pnpm start)
 (cd "$repo_dir" && go run ./examples/go)
